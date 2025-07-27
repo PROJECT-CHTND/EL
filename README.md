@@ -61,6 +61,20 @@ pytest を利用して各ステージのユニットテストを実行できま�
 pytest -q
 ```
 
+### ローカルで CI を再現する
+
+GitHub Actions と同じチェック (pytest + mypy) を手元で走らせるには Makefile を用意しています。
+
+```bash
+# 依存インストール (仮想環境 .venv)
+make install
+
+# 型チェック + テスト実行
+make ci
+```
+
+`python3.11` が無い場合は `make PYTHON=python3.10 install` のようにバージョンを指定できます。
+
 ### 運用 Runbook
 
 詳細な運用手順・アラート設定は `docs/OPERATIONS.md` を参照してください。
