@@ -1,0 +1,71 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import yaml  # type: ignore
+
+from agent.llm.openai_client import OpenAIClient
+from agent.prompts.qgen import SYSTEM_PROMPT
+from agent.slots import Slot
+from agent.models.question import Question
+
+openai_client = OpenAIClient()
+
+DEFAULT_STRATEGY_PATH = Path(__file__).parent.parent / "prompts" / "qgen_strategy.yaml"
+
+
+def _load_strategy_map(path: Path) -> Dict[str, Dict[str, str]]:
+    return yaml.safe_load(path.read_text())  # type: ignore[arg-type]
+
+
+def _render_template(template: str, slot: Slot) -> str:
+    return template.replace("{{name}}", slot.name).replace("{{description}}", slot.description)
+
+
+async def generate_questions(
+    slots: List[Slot],
+    *,
+    strategy_path: Path = DEFAULT_STRATEGY_PATH,
+    max_questions: int = 10,
+) -> List[Question]:
+    """Generate questions for the given slots using strategy map."""
+
+    strategy_map = _load_strategy_map(strategy_path)
+
+    # Build pseudo examples for system prompt using strategy templates
+    examples: List[Dict[str, str]] = []
+    for slot in slots[:max_questions]:
+        strat = strategy_map.get(slot.type, strategy_map.get("default"))
+        template = strat["template"] if isinstance(strat, dict) else strat
+        examples.append({"slot_name": slot.name, "question": _render_template(template, slot)})
+
+    user_content = json.dumps(examples, ensure_ascii=False)
+
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+
+    response = await openai_client.call(messages=messages, temperature=0.6, logprobs=False)
+
+    raw_content = response.content.strip()
+    if raw_content.startswith("```"):
+        raw_content = raw_content.lstrip("`json\n").rstrip("`")
+
+    try:
+        arr = json.loads(raw_content)
+        if not isinstance(arr, list):
+            arr = []
+    except json.JSONDecodeError:
+        arr = []
+
+    questions: List[Question] = []
+    for item in arr:
+        try:
+            questions.append(Question.model_validate(item))
+        except Exception:  # noqa: BLE001
+            continue
+
+    return questions 
