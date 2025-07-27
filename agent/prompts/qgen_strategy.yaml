@@ -1,0 +1,4 @@
+default:
+  template: "For the slot '{{name}}' ({{description}}), ask a question to obtain the missing information."
+attribute:
+  template: "What is the {{name}}? Please provide details regarding {{description}}." 

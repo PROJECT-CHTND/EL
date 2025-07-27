@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+import json
+from typing import Dict, List
+
+from agent.llm.openai_client import OpenAIClient
+from agent.models.question import Question
+from agent.prompts.qcheck import SYSTEM_PROMPT, ACCEPT_THRESHOLD
+
+openai_client = OpenAIClient()
+
+
+async def return_validated_questions(questions: List[Question]) -> List[Question]:
+    """Evaluate questions and return only those meeting threshold criteria."""
+
+    # Serialize input questions for LLM
+    q_in = [q.model_dump(exclude_none=True) for q in questions]
+    user_content = json.dumps(q_in, ensure_ascii=False)
+
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+
+    response = await openai_client.call(messages=messages, temperature=0.0, logprobs=False)
+
+    raw_content = response.content.strip()
+
+    # Remove leading Markdown code fences if present without accidentally stripping
+    # valid JSON characters. Handle both language-specified (```json) and generic
+    # (```) fences explicitly.
+    if raw_content.startswith("```json"):
+        # Remove the first 7 characters: "```json"
+        raw_content = raw_content[7:]
+        # Strip trailing backticks and surrounding whitespace
+        raw_content = raw_content.rstrip("`").strip()
+    elif raw_content.startswith("```"):
+        # Remove the first 3 characters: "```"
+        raw_content = raw_content[3:]
+        raw_content = raw_content.rstrip("`").strip()
+
+    try:
+        arr = json.loads(raw_content)
+        if not isinstance(arr, list):
+            arr = []
+    except json.JSONDecodeError:
+        arr = []
+
+    accepted: List[Question] = []
+    for item in arr:
+        try:
+            q = Question.model_validate(item)
+            if (q.specificity or 0.0) >= ACCEPT_THRESHOLD and (q.tacit_power or 0.0) >= ACCEPT_THRESHOLD:
+                accepted.append(q)
+        except Exception:  # noqa: BLE001
+            continue
+
+    return accepted 
