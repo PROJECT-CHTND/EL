@@ -172,10 +172,12 @@ python nani_bot.py
 
 さらに、会話内容から得られた知識や洞察を、RAG（Retrieval-Augmented Generation）システムで活用しやすいように構造化されたJSONL形式(`.jsonl`)のファイルとしても同時に出力します。
 
-## ファイル構成
+## ファイル構成（主要）
 
--   `nani_bot.py`: Botのメインプログラムです。
--   `prompts.py`: AIに与える指示（プロンプト）を管理するファイルです。対話の進行やRAGデータ生成のためのテンプレートが含まれます。
--   `requirements.txt`: 必要なPythonライブラリのリストです。
--   `.env` (作成が必要): APIキーなどの機密情報を保存するファイルです。
--   `README.md`: このファイルです。Botの概要や使い方を説明しています。 
+- `agent/` : 暗黙知抽出エージェント (FastAPI) の実装
+- `tests/` : pytest ユニットテスト
+- `docs/OPERATIONS.md` : 運用 Runbook
+- `README.md` : 本ドキュメント
+- `requirements.txt` : ランタイム依存ライブラリ
+- `dev-requirements.txt` : 開発 / CI 用ライブラリ
+- `Makefile` : ローカル CI コマンド (`make ci` など) 
