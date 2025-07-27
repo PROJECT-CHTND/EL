@@ -1,7 +1,15 @@
-from fastapi import FastAPI, APIRouter, HTTPException  # type: ignore
+from fastapi import FastAPI, APIRouter, HTTPException, Depends  # type: ignore
+from fastapi.responses import StreamingResponse  # type: ignore
+import json
 from pydantic import BaseModel, ValidationError
 
+from agent.pipeline.stage01_context import generate_context
 from agent.pipeline.stage02_extract import extract_knowledge
+from agent.pipeline.stage04_slots import propose_slots
+from agent.security.jwt_auth import verify_jwt
+from agent.monitoring import attach_instrumentator
+from agent.models.context import ContextPayload
+from agent.slots import Slot
 from agent.models.kg import KGPayload
 
 app = FastAPI(title="Implicit Knowledge Extraction Agent")
@@ -19,7 +27,7 @@ class ExtractResponse(KGPayload):
     """Simply returns the extracted knowledge payload."""
 
 
-@router.post("", response_model=ExtractResponse)
+@router.post("", response_model=ExtractResponse, dependencies=[Depends(verify_jwt)])
 async def extract(req: ExtractRequest) -> ExtractResponse:
     """Endpoint to extract knowledge graph information.
 
@@ -44,4 +52,48 @@ async def extract(req: ExtractRequest) -> ExtractResponse:
     return ExtractResponse.model_validate(payload)
 
 
-app.include_router(router) 
+@app.post("/stream_pipeline", tags=["stream"], dependencies=[Depends(verify_jwt)])
+async def stream_pipeline(req: ExtractRequest) -> StreamingResponse:  # type: ignore[override]
+    """Run context → extraction → slot discovery and stream progress via SSE."""
+
+    async def event_generator():  # noqa: WPS430
+        # Stage 1: context
+        context: ContextPayload = await generate_context(req.text)
+        yield {
+            "stage": "context",
+            "progress": 20,
+            "context": context.model_dump(),
+        }
+
+        # Stage 2: extraction
+        kg_payload = await extract_knowledge(req.text, focus=req.focus, temperature=req.temperature)
+        yield {
+            "stage": "extract",
+            "progress": 60,
+            "kg": kg_payload.model_dump(),
+        }
+
+        # Stage 4: slot discovery
+        slots: list[Slot] = await propose_slots(kg_payload)
+        yield {
+            "stage": "slots",
+            "progress": 80,
+            "slots": [s.model_dump() for s in slots],
+        }
+
+        yield {"stage": "complete", "progress": 100}
+
+    async def sse_wrapper():
+        async for chunk in event_generator():
+            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(sse_wrapper(), media_type="text/event-stream")
+
+
+app.include_router(router)
+
+# Prometheus metrics
+try:
+    attach_instrumentator(app)
+except Exception:  # noqa: BLE001
+    pass 
