@@ -25,8 +25,19 @@ async def return_validated_questions(questions: List[Question]) -> List[Question
     response = await openai_client.call(messages=messages, temperature=0.0, logprobs=False)
 
     raw_content = response.content.strip()
-    if raw_content.startswith("```"):
-        raw_content = raw_content.lstrip("`json\n").rstrip("`")
+
+    # Remove leading Markdown code fences if present without accidentally stripping
+    # valid JSON characters. Handle both language-specified (```json) and generic
+    # (```) fences explicitly.
+    if raw_content.startswith("```json"):
+        # Remove the first 7 characters: "```json"
+        raw_content = raw_content[7:]
+        # Strip trailing backticks and surrounding whitespace
+        raw_content = raw_content.rstrip("`").strip()
+    elif raw_content.startswith("```"):
+        # Remove the first 3 characters: "```"
+        raw_content = raw_content[3:]
+        raw_content = raw_content.rstrip("`").strip()
 
     try:
         arr = json.loads(raw_content)

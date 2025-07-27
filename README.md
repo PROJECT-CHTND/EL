@@ -1,8 +1,71 @@
-# Nani - A Bilingual Thinking Partner
+# EL (Eager Learner) - A Bilingual Thinking Partner
+
+---
+
+## Implicit Knowledge Extraction Agent (API) – WIP
+
+このリポジトリには現在、Discord Bot「EL」に加えて、**暗黙知抽出エージェント (FastAPI)** の実装が進行中です。
+
+| 完了ステージ | 概要 |
+|--------------|------|
+| Stage① Context | 元テキストから 3 層要約 (rag_keys / mid / global) を生成し、任意で Redis Stream へ publish |
+| Stage② Extraction | OpenAI Function-calling でエンティティ・リレーションを抽出 (`save_kv`) |
+| Stage③ Merge | 抽出 KG を Neo4j にマージ、logprob から信頼度を算出 |
+| Stage④ Slots | KG を分析し、未充足スロットを最大 3 件提案 |
+| Stage⑤ Gap Analysis | SlotRegistry から優先度を計算 (`importance × (1 - filled) × recency`) |
+| Stage⑥ Question Gen | スロットごとの質問をテンプレートベースで生成 |
+| Stage⑦ Question QA | specificity / tacit_power ≥ 0.7 の質問のみ採用 |
+
+### ディレクトリ構成 (抜粋)
+
+```
+agent/
+  api/            # FastAPI エンドポイント (/extract など)
+  pipeline/       # 上記 7 ステージ実装
+  prompts/        # システム・テンプレートプロンプト
+  llm/            # OpenAIClient ラッパー & function schemas
+  kg/             # Neo4j クライアント
+  slots/          # SlotRegistry & GapAnalysis
+  models/         # pydantic モデル
+tests/            # pytest によるユニットテスト
+```
+
+### エンドポイント
+
+| Method | Path | 説明 |
+|--------|------|------|
+| POST | `/extract` | Stage①–③ (現在は②まで) を実行し、`KGPayload` を返却 |
+
+### 依存関係のインストール
+
+```bash
+pip install -r requirements.txt
+```
+
+追加で以下の環境変数を設定してください (例 `.env`):
+
+```
+OPENAI_API_KEY="sk-..."
+NEO4J_URI="bolt://localhost:7687"
+NEO4J_USER="neo4j"
+NEO4J_PASSWORD="password"
+REDIS_URL="redis://localhost:6379"          # 任意
+AUTO_INGEST_NEO4J="1"                      # 自動マージを有効化
+```
+
+### テスト
+
+pytest を利用して各ステージのユニットテストを実行できます。
+
+```bash
+pytest -q
+```
+
+---
 
 ## 概要
 
-Naniは、Discord上で対話を通じてユーザーの考えや洞察を深める手助けをするためのBotです。指定されたトピックについて、Botが知識に基づいた探求的な質問を投げかけ、ユーザーが自分の考えを整理し、新しい視点を発見することをサポートします。
+ELは、Discord上で対話を通じてユーザーの考えや洞察を深める手助けをするためのBotです。指定されたトピックについて、Botが知識に基づいた探求的な質問を投げかけ、ユーザーが自分の考えを整理し、新しい視点を発見することをサポートします。
 
 **日本語と英語の両方に対応しています。**
 
@@ -52,7 +115,7 @@ Naniは、Discord上で対話を通じてユーザーの考えや洞察を深め
 python nani_bot.py
 ```
 
-コンソールに `🧠 Nani has started!` と表示されれば成功です。
+コンソールに `🧠 EL has started!` と表示されれば成功です。
 
 ## コマンド一覧
 

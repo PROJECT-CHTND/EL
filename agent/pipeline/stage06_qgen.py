@@ -37,9 +37,25 @@ async def generate_questions(
     # Build pseudo examples for system prompt using strategy templates
     examples: List[Dict[str, str]] = []
     for slot in slots[:max_questions]:
-        strat = strategy_map.get(slot.type, strategy_map.get("default"))
-        template = strat["template"] if isinstance(strat, dict) else strat
-        examples.append({"slot_name": slot.name, "question": _render_template(template, slot)})
+        for slot in slots[:max_questions]:
+            strat = strategy_map.get(slot.type) or strategy_map.get("default")
+            if not strat:
+                raise ValueError(f"No strategy found for slot type '{slot.type}' and no default strategy")
+            
+            if isinstance(strat, dict):
+                template = strat.get("template")
+                if not template:
+                    raise ValueError(f"Strategy for slot type '{slot.type}' missing 'template' key")
+            else:
+                template = strat
+            
+            if not isinstance(template, str):
+                raise ValueError(f"Template must be a string, got {type(template)}")
+            
+            examples.append({
+                "slot_name": slot.name,
+                "question": _render_template(template, slot)
+            })
 
     user_content = json.dumps(examples, ensure_ascii=False)
 

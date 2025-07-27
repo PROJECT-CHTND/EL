@@ -41,6 +41,14 @@ class Neo4jClient:
         entities_data = [
             {
                 "id": ent.id,
+                "label": ent.label,
+                "type": ent.type,
+                "confidence": ent.confidence,
+            }
+            for ent in entities_list
+        ]
+
+        tx.run(query, entities=entities_data)
     @staticmethod
     def _merge_relations(tx: Transaction, relations: Iterable[Relation]) -> None:
         relations_list = list(relations)
