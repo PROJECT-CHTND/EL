@@ -61,6 +61,28 @@ pytest を利用して各ステージのユニットテストを実行できま�
 pytest -q
 ```
 
+### ローカルで CI を再現する
+
+GitHub Actions と同じチェック (pytest + mypy) を手元で走らせるには Makefile を用意しています。
+
+```bash
+# 依存インストール (仮想環境 .venv)
+make install
+
+# 型チェック + テスト実行
+make ci
+```
+
+`python3.11` が無い場合は `make PYTHON=python3.10 install` のようにバージョンを指定できます。
+
+### 運用 Runbook
+
+詳細な運用手順・アラート設定は `docs/OPERATIONS.md` を参照してください。
+
+### OpenAPI
+
+サーバー起動後、`/docs` (Swagger UI) または `/openapi.json` でスキーマを確認できます。
+
 ---
 
 ## 概要
@@ -75,6 +97,8 @@ ELは、Discord上で対話を通じてユーザーの考えや洞察を深め�
 -   **探求的な質問**: AIを活用し、対話の文脈に応じてユーザーの思考を促す質問を生成します。
 -   **セッションの振り返り**: `!reflect` コマンドで、いつでも対話の途中経過や発見を要約して確認できます。
 -   **対話の記録**: `!finish` コマンドでセッションを終了すると、対話の全記録がMarkdownファイルとして保存されます。
+
+さらに、会話内容から得られた知識や洞察を、RAG（Retrieval-Augmented Generation）システムで活用しやすいように構造化されたJSONL形式(`.jsonl`)のファイルとしても同時に出力します。
 
 ## 動作環境
 
