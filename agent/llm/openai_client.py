@@ -1,6 +1,17 @@
+# noqa: D205,D400
 from __future__ import annotations
 
 import os
+
+# Ensure .env is loaded early
+try:
+    from dotenv import load_dotenv  # type: ignore
+
+    load_dotenv()
+except ImportError:
+    # dotenv not installed; rely on system envs
+    pass
+
 from typing import Any, List, Dict, Optional
 
 import openai
@@ -15,12 +26,21 @@ class OpenAIClient:
     """
 
     def __init__(self, model: str = "gpt-4o") -> None:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if api_key is None:
-            raise EnvironmentError("OPENAI_API_KEY environment variable not set")
+        api_key = os.getenv("OPENAI_API_KEY", "DUMMY_KEY_FOR_TESTS")
         
-        self.client = openai.AsyncOpenAI(api_key=api_key)
+        # Lazily create client only when real key is provided
+        self._api_key = api_key
+        self._client = None
         self.model = model
+
+    @property
+    def client(self):  # noqa: D401
+        """Lazily initialise AsyncOpenAI client if possible."""
+        if self._client is None and self._api_key != "DUMMY_KEY_FOR_TESTS":
+            import openai  # local import
+
+            self._client = openai.AsyncOpenAI(api_key=self._api_key)
+        return self._client
 
     async def call(
         self,

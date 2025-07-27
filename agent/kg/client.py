@@ -73,22 +73,10 @@ class Neo4jClient:
         ]
 
         tx.run(query, relations=relations_data)
-                type=ent.type,
-                confidence=ent.confidence,
-            )
 
-    @staticmethod
-    def _merge_relations(tx: Transaction, relations: Iterable[Relation]) -> None:
-        query = (
-            "MATCH (s:Entity {id: $source}), (t:Entity {id: $target}) "
-            "MERGE (s)-[r:RELATION {type: $type}]->(t) "
-            "SET r.confidence = $confidence"
-        )
-        for rel in relations:
-            tx.run(
-                query,
-                source=rel.source,
-                target=rel.target,
-                type=rel.type,
-                confidence=rel.confidence,
-            ) 
+    def ingest(self, payload: KGPayload) -> None:
+        """Ingest a KGPayload into Neo4j."""
+
+        with self._driver.session() as session:
+            session.execute_write(self._merge_entities, payload.entities)  # type: ignore[arg-type]
+            session.execute_write(self._merge_relations, payload.relations)  # type: ignore[arg-type] 
