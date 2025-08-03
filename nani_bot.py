@@ -44,7 +44,7 @@ def detect_language(text: str) -> str:
     )
     return "Japanese" if japanese_chars else "English"
 
-class NaniBot(commands.Bot):
+class ELBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
@@ -52,7 +52,7 @@ class NaniBot(commands.Bot):
         self.sessions = {}
         
     async def on_ready(self):
-        print(f'🧠 {self.user} - Nani has started!')
+        print(f'🧠 {self.user} - EL has started!')
         await self.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.listening,
@@ -60,7 +60,7 @@ class NaniBot(commands.Bot):
             )
         )
 
-bot = NaniBot()
+bot = ELBot()
 
 class ThinkingSession:
     def __init__(self, user_id: str, topic: str, thread_id: int, language: str):
@@ -596,5 +596,5 @@ if __name__ == "__main__":
     if not token:
         print("❌ DISCORD_BOT_TOKEN is not set.")
     else:
-        print("🧠 Nani is starting...")
+        print("🧠 EL is starting...")
         bot.run(token) 
