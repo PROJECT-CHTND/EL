@@ -7,6 +7,17 @@ from dotenv import load_dotenv
 import openai
 import json
 from datetime import datetime
+from pathlib import Path
+import yaml  # type: ignore
+
+# --- Pipeline modules ---
+from agent.pipeline.stage02_extract import extract_knowledge
+from agent.pipeline.stage03_merge import merge_and_persist
+from agent.pipeline.stage04_slots import propose_slots
+from agent.pipeline.stage06_qgen import generate_questions
+from agent.pipeline.stage07_qcheck import return_validated_questions
+from agent.models.question import Question
+
 import asyncio
 import io
 from typing import List, Dict, Any, Optional
@@ -132,7 +143,7 @@ async def start_exploration(ctx, *, topic: Optional[str] = None):
     await ctx.send(embed=embed)
     
     # 最初の質問
-    first_question = get_opening_question(topic, session.language)
+    first_question = await generate_opening_question(topic, session.language)
     session.last_question = first_question # 最初の質問を保存
     
     q_embed = discord.Embed(
@@ -311,6 +322,36 @@ async def on_message(message: discord.Message):
             session.last_question = fallback_q
 
 
+# Opening Question generator using external prompt
+async def generate_opening_question(topic: str, lang: str) -> str:
+    """Generate the very first question for a given topic using an external prompt file.
+    Falls back to the legacy rule-based function if the LLM fails.
+    """
+    try:
+        prompt_path = Path(__file__).parent / "agent" / "prompts" / "opening.yaml"
+        with prompt_path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        system_prompt_tpl: str = data.get("system_opening_prompt", "")
+        system_prompt = system_prompt_tpl.format(language=lang)
+
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Topic: {topic}"},
+            ],
+            temperature=0.7,
+        )
+        content = response.choices[0].message.content or ""
+        question = content.strip()
+        if question and len(question) < 250:
+            return question
+        raise ValueError("Invalid opening question")
+    except Exception as exc:  # noqa: BLE001
+        # Fallback to deterministic rule-based question
+        print(f"[OpeningQ] Fallback due to: {exc}")
+        return get_opening_question(topic, lang)
+
 # ヘルパー関数
 def get_opening_question(topic: str, lang: str) -> str:
     """トピックに応じた知識を活用した最初の質問を生成"""
@@ -340,6 +381,56 @@ def get_opening_question(topic: str, lang: str) -> str:
         return f"\"{topic}\" sounds interesting and multi-faceted.\nWhat aspect feels most important for you to explore first?"
 
 async def analyze_and_respond(session: ThinkingSession) -> dict:
+    """Generate the next question(s) using the full pipeline; fallback to legacy method."""
+    try:
+        # 1) Get the latest user answer text
+        if not session.messages:
+            raise ValueError("No previous messages recorded")
+        answer_text: str = session.messages[-1]["answer"]
+
+        # 2) Stage02 – extract KG fragment
+        kg = await extract_knowledge(answer_text, focus=session.topic)
+
+        # 3) Stage03 – merge/persist KG (non-blocking)
+        try:
+            merge_and_persist(kg)
+        except Exception as merge_err:  # noqa: BLE001
+            print(f"[Pipeline] merge_and_persist failed: {merge_err}")
+
+        # 4) Stage04 – propose slots
+        slots = await propose_slots(kg, topic_meta=session.topic)
+        if not slots:
+            raise ValueError("No slots proposed")
+
+        # 5) Stage06 – generate questions
+        questions = await generate_questions(slots)
+        if not questions:
+            raise ValueError("No questions generated")
+
+        # 6) Stage07 – validate questions
+        validated = await return_validated_questions(questions)
+        if not validated:
+            raise ValueError("No validated questions")
+
+        # Convert to legacy response format expected by downstream code
+        next_questions = [
+            {
+                "level": 2,  # default depth indicator
+                "type": "clarifying",
+                "question": q.text,
+            }
+            for q in validated
+        ]
+        return {
+            "next_questions": next_questions,
+            "session_progress": {},
+        }
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Pipeline] Falling back to legacy: {exc}")
+        return await analyze_and_respond_legacy(session)
+
+# --- Legacy analysis function kept for fallback ---
+async def analyze_and_respond_legacy(session: ThinkingSession) -> dict:
     """回答を分析して次の質問を生成"""
     system_prompt = BILINGUAL_PROMPT_TEMPLATE.format(
         language=session.language,

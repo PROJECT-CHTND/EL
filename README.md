@@ -79,6 +79,30 @@ make ci
 
 詳細な運用手順・アラート設定は `docs/OPERATIONS.md` を参照してください。
 
+### パイプラインをコマンドラインで試す (`pipeline_cli.py`)
+
+以下のスクリプトで、FastAPI サーバを立てずに 7 ステージ・パイプラインを単体実行できます。
+
+```bash
+python scripts/pipeline_cli.py input.txt --focus "AI" --temp 0.3
+```
+
+- **`input.txt`** : 抽出対象の本文ファイル (UTF-8) を指定します。
+- **`--focus`**    : (任意) 重点的に抽出したいキーワード。例 `--focus "生成AI"`。
+- **`--temp`**     : (任意) OpenAI temperature。デフォルト 0.0。
+
+環境変数 `.env` に設定した `OPENAI_API_KEY` が必須です。さらに
+`NEO4J_*` や `REDIS_URL` を設定すると、ステージ③で自動マージ、ステージ①で
+Redis Stream への publish が行われます。
+
+実行例の出力順:
+1. Stage01 コンテキスト3分割
+2. Stage02 KG 抽出
+3. Stage04 スロット提案
+4. Stage06/07 質問生成 → QA 結果
+
+---
+
 ### OpenAPI
 
 サーバー起動後、`/docs` (Swagger UI) または `/openapi.json` でスキーマを確認できます。
