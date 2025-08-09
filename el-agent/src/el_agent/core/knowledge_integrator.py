@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..schemas import Evidence, Hypothesis
+from ..monitoring.metrics import RETRIEVAL_CALLS
 
 
 def _tokenize(text: str) -> List[str]:
@@ -93,6 +94,7 @@ class KnowledgeIntegrator:
         bm25_hits: List[Dict[str, Any]] = []
         if self.es is not None:
             try:
+                RETRIEVAL_CALLS.labels(stage="bm25").inc()
                 bm25_hits = list(self.es.search_bm25(index="documents", query=query, size=k_bm25))
             except Exception:
                 bm25_hits = []
@@ -101,11 +103,13 @@ class KnowledgeIntegrator:
         if self.qdrant is not None:
             try:
                 # Stub: vectorization not implemented; tests will monkeypatch .search
+                RETRIEVAL_CALLS.labels(stage="vector").inc()
                 vec_hits = list(self.qdrant.search(query_vector=[0.0, 0.0, 0.0], top_k=k_vec))
             except Exception:
                 vec_hits = []
 
         # Reciprocal Rank Fusion
+        RETRIEVAL_CALLS.labels(stage="rrf").inc()
         fused = _rrf_merge(bm25_hits, vec_hits, k_rrf=k_rrf)
 
         # Create lightweight doc entries for next stage
@@ -136,6 +140,7 @@ class KnowledgeIntegrator:
             length_bonus = 0.001 * min(len(t_tokens), 200)
             return overlap + length_bonus
 
+        RETRIEVAL_CALLS.labels(stage="rerank").inc()
         ranked_docs: List[Dict[str, Any]] = []
         for doc_id, rrf_score in fused:
             doc = id_to_doc.get(doc_id, {"id": doc_id})

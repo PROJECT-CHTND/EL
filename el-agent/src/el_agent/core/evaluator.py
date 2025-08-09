@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+import json
+import logging
+import os
+from pathlib import Path
 
 from ..schemas import Evidence, Hypothesis
 
@@ -27,6 +31,8 @@ def logit(p: float) -> float:
 
 class ConfidenceEvaluator:
     def __init__(self, weights: Optional[Dict[str, float]] = None) -> None:
+        self._logger = logging.getLogger(__name__)
+
         default = {
             "cosine": 0.6,
             "source_trust": 0.3,
@@ -38,6 +44,65 @@ class ConfidenceEvaluator:
         # Scale factor from signed evidence score in [-1, 1] to logit delta
         self.scale = 2.0
 
+        # Optional calibrated logistic-regression weights
+        self._calibrated: Optional[Dict[str, Any]] = self._load_calibrated_weights()
+        if self._calibrated is None:
+            self._logger.info("ConfidenceEvaluator: using default heuristic weights")
+        else:
+            src = self._calibrated.get("_source_path", "<unknown>")
+            self._logger.info("ConfidenceEvaluator: loaded calibrated weights from %s", src)
+
+    def _load_calibrated_weights(self) -> Optional[Dict[str, Any]]:
+        # 1) Environment variable takes precedence
+        env_path = os.getenv("EL_EVAL_WEIGHTS")
+        candidate_paths: List[Path] = []
+        if env_path:
+            candidate_paths.append(Path(env_path).expanduser())
+
+        # 2) Search upward for config/weights/weights.json from this file location
+        try:
+            here = Path(__file__).resolve()
+            for parent in [here] + list(here.parents):
+                candidate = parent / "config" / "weights" / "weights.json"
+                if candidate.exists():
+                    candidate_paths.append(candidate)
+        except Exception:
+            pass
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique_paths: List[Path] = []
+        for p in candidate_paths:
+            if p not in seen:
+                seen.add(p)
+                unique_paths.append(p)
+
+        for path in unique_paths:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                # Validate schema: {"intercept": float, "coef": {str: float}}
+                if not isinstance(data, dict):
+                    continue
+                if "intercept" not in data or "coef" not in data:
+                    continue
+                coef = data.get("coef", {})
+                if not isinstance(coef, dict):
+                    continue
+                # Cast to floats
+                intercept = float(data.get("intercept", 0.0))
+                coef_cast: Dict[str, float] = {}
+                for k, v in coef.items():
+                    try:
+                        coef_cast[str(k)] = float(v)
+                    except Exception:
+                        continue
+                out = {"intercept": intercept, "coef": coef_cast, "_source_path": str(path)}
+                return out
+            except Exception:
+                continue
+        return None
+
     def score(self, ev: Evidence) -> Dict[str, Any]:
         fv = ev.feature_vector or {}
         # Base features in [0,1]
@@ -47,32 +112,59 @@ class ConfidenceEvaluator:
         logic_ok = 1.0 if int(fv.get("logic_ok", 1)) else 0.0
 
         # Redundancy proxy: more supports -> higher redundancy [0,1]
-        redundancy = 0.0
-        if isinstance(ev.supports, list) and len(ev.supports) > 1:
-            # Saturate at 1 when >= 5 supports
-            redundancy = min(1.0, max(0.0, (len(ev.supports) - 1) / 4.0))
+        redundancy = float(fv.get("redundancy", 0.0))
+        if "redundancy" not in fv:
+            if isinstance(ev.supports, list) and len(ev.supports) > 1:
+                redundancy = min(1.0, max(0.0, (len(ev.supports) - 1) / 4.0))
+            else:
+                redundancy = 0.0
 
         # Majority polarity: '+' => +1, '-' => -1; tie defaults to +1
         pos = sum(1 for s in (ev.supports or []) if str(s.get("polarity", "+")) == "+")
         neg = sum(1 for s in (ev.supports or []) if str(s.get("polarity", "+")) == "-")
         sign = 1.0 if pos >= neg else -1.0
 
-        # Weighted score in [0,1] before sign
-        pos_weights = self.weights["cosine"] + self.weights["source_trust"] + self.weights["recency"] + self.weights["logic_ok"]
-        # To keep bounded, normalize by sum of positive weights
+        # If calibrated LR weights are available, use them to compute logit_delta directly
+        if self._calibrated is not None:
+            coef_map: Dict[str, float] = self._calibrated.get("coef", {})  # type: ignore[assignment]
+            intercept: float = float(self._calibrated.get("intercept", 0.0))  # type: ignore[assignment]
+
+            feature_values: Dict[str, float] = {
+                "cosine": cosine,
+                "source_trust": source_trust,
+                "recency": recency,
+                "logic_ok": logic_ok,
+                "redundancy": redundancy,
+                "polarity_sign": sign,
+            }
+            # Only multiply features present in coef_map
+            linear_sum = intercept
+            used: Dict[str, float] = {}
+            for name, w in coef_map.items():
+                val = float(feature_values.get(name, 0.0))
+                linear_sum += float(w) * val
+                used[name] = val
+
+            return {
+                "logit_delta": float(linear_sum),
+                "features": {
+                    **feature_values,
+                    "used_in_model": used,
+                },
+            }
+
+        # Fallback heuristic path
+        pos_weights = (
+            self.weights["cosine"] + self.weights["source_trust"] + self.weights["recency"] + self.weights["logic_ok"]
+        )
         base = (
             cosine * self.weights["cosine"]
             + source_trust * self.weights["source_trust"]
             + recency * self.weights["recency"]
             + logic_ok * self.weights["logic_ok"]
         ) / max(1e-9, pos_weights)
-
-        # Apply redundancy penalty (negative weight)
         base = max(0.0, min(1.0, base + redundancy * self.weights["redundancy_penalty"]))
-
-        # Map to [-1, 1] by applying polarity directly to magnitude
         s_signed = sign * base
-
         delta = self.scale * s_signed
 
         return {

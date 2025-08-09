@@ -2,12 +2,14 @@ import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Request, Response
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
+from prometheus_client import make_asgi_app, generate_latest, CONTENT_TYPE_LATEST
 
 from .config import get_settings
 from .schemas import Hypothesis, StrategistAction
 from .core.strategist import Strategist
 from .core.evaluator import update_belief
+from .core.orchestrator import write_wal_line
+from .monitoring.metrics import REQUEST_LATENCY, LLM_CALLS, RETRIEVAL_CALLS, HYPOTHESES_OPEN
 
 try:
     import redis  # type: ignore
@@ -15,19 +17,19 @@ except Exception:  # pragma: no cover
     redis = None  # type: ignore
 
 
-REQUEST_LATENCY = Histogram(
-    "request_latency_seconds",
-    "Request latency",
-    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
-)
-LLM_CALLS = Counter("llm_calls_total", "LLM calls", labelnames=("kind",))
-RETRIEVAL_CALLS = Counter("retrieval_calls_total", "Retrieval calls")
-HYPOTHESES_OPEN = Gauge("hypotheses_open", "Number of open hypotheses")
+# Metrics are imported from monitoring.metrics
 
 
 def create_app() -> FastAPI:
     _ = get_settings()  # ensures env loads; currently unused
     application = FastAPI(title="EL Agent", version="0.1.0")
+
+    # Initialize label sets so families appear even before first use
+    try:
+        LLM_CALLS.labels(kind="bootstrap").inc(0)
+        RETRIEVAL_CALLS.labels(stage="bootstrap").inc(0)
+    except Exception:
+        pass
 
     @application.middleware("http")
     async def metrics_middleware(request: Request, call_next):  # type: ignore[override]
@@ -36,17 +38,21 @@ def create_app() -> FastAPI:
             response: Response = await call_next(request)
             return response
         finally:
-            REQUEST_LATENCY.observe(time.perf_counter() - start)
+            endpoint = request.url.path
+            REQUEST_LATENCY.labels(endpoint=endpoint).observe(time.perf_counter() - start)
 
     @application.get("/health")
     async def health() -> dict[str, bool]:
         HYPOTHESES_OPEN.set(0)
         return {"ok": True}
 
+    # Expose metrics both at /metrics (no redirect) and mounted ASGI app for compatibility
     @application.get("/metrics")
     async def metrics() -> Response:
         data = generate_latest()
         return Response(content=data, media_type=CONTENT_TYPE_LATEST)
+
+    application.mount("/metrics", make_asgi_app())
 
     # --- Simple E2E endpoint for gate testing ---
     @application.post("/respond")
@@ -110,6 +116,30 @@ def create_app() -> FastAPI:
         except Exception:
             pass
 
+        # Update open hypotheses gauge
+        try:
+            open_count = sum(1 for h in updated if str(getattr(h, "status", "open")) == "open")
+            HYPOTHESES_OPEN.set(open_count)
+        except Exception:
+            # Defensive: never fail the request on metrics
+            HYPOTHESES_OPEN.set(0)
+
+        # Increment counters to reflect work implied by actions
+        try:
+            ask_count = sum(1 for a in actions if a.action == "ask")
+            search_count = sum(1 for a in actions if a.action == "search")
+            if ask_count:
+                # Treat each ask as one LLM question generation
+                LLM_CALLS.labels(kind="generate_question").inc(ask_count)
+            if search_count:
+                # Treat each search as one pass through retrieval pipeline stages
+                RETRIEVAL_CALLS.labels(stage="bm25").inc(search_count)
+                RETRIEVAL_CALLS.labels(stage="vector").inc(search_count)
+                RETRIEVAL_CALLS.labels(stage="rrf").inc(search_count)
+                RETRIEVAL_CALLS.labels(stage="rerank").inc(search_count)
+        except Exception:
+            pass
+
         # Synthesize deterministic markdown (no external LLM call)
         lines: List[str] = [
             "# Session Report",
@@ -136,6 +166,19 @@ def create_app() -> FastAPI:
         lines.append(paragraph)
 
         md = "\n".join(lines)
+
+        # Write WAL lines for observability
+        try:
+            write_wal_line(
+                "respond.actions",
+                {"count": len(actions), "by_type": {a.action: sum(1 for x in actions if x.action == a.action) for a in actions}},
+            )
+            write_wal_line(
+                "respond.hypotheses",
+                {"before": [h.model_dump() for h in items], "after": [h.model_dump() for h in updated]},
+            )
+        except Exception:
+            pass
 
         return {
             "actions": [a.model_dump() for a in actions],

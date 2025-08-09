@@ -1,0 +1,57 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Request latency (p50/p90/p99) by endpoint",
+      "datasource": {"type": "prometheus", "uid": "grafana-prom"},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, sum(rate(request_latency_seconds_bucket[5m])) by (le, endpoint))", "refId": "A"},
+        {"expr": "histogram_quantile(0.9, sum(rate(request_latency_seconds_bucket[5m])) by (le, endpoint))", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum(rate(request_latency_seconds_bucket[5m])) by (le, endpoint))", "refId": "C"}
+      ],
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}}
+    },
+    {
+      "type": "stat",
+      "title": "Open hypotheses",
+      "datasource": {"type": "prometheus", "uid": "grafana-prom"},
+      "targets": [{"expr": "hypotheses_open", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": ""}}
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM calls by kind",
+      "datasource": {"type": "prometheus", "uid": "grafana-prom"},
+      "targets": [{"expr": "sum(rate(llm_calls_total[5m])) by (kind)", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Retrieval calls by stage",
+      "datasource": {"type": "prometheus", "uid": "grafana-prom"},
+      "targets": [{"expr": "sum(rate(retrieval_calls_total[5m])) by (stage)", "refId": "A"}]
+    },
+    {
+      "type": "logs",
+      "title": "WAL logs (Loki)",
+      "datasource": {"type": "loki", "uid": "grafana-loki"},
+      "options": {"showLabels": true},
+      "targets": [{"expr": "{job=\"wal\"}"}]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["el-agent"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timezone": "",
+  "title": "EL Agent Overview",
+  "version": 1
+}
+
