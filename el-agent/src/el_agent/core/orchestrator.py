@@ -9,6 +9,7 @@ from .evaluator import Evaluator
 from .knowledge_integrator import KnowledgeIntegrator
 from .strategist import Strategist
 from ..schemas import Evidence, Hypothesis
+from ..utils.pii import mask_structure, user_id_hash
 
 
 class Orchestrator:
@@ -50,7 +51,14 @@ def write_wal_line(event: str, data: Dict[str, Any] | None = None) -> None:
         ts = datetime.utcnow().isoformat() + "Z"
         fname = datetime.utcnow().strftime("%Y-%m-%d.log")
         path = _wal_dir() / fname
-        record = {"ts": ts, "event": str(event), "data": data or {}}
+        data_in: Dict[str, Any] = dict(data or {})
+        # Derive user_id_hash from session_id if present, then drop raw session_id
+        sid = data_in.pop("session_id", None)
+        uid_hash = user_id_hash(str(sid)) if sid is not None else None
+        masked_data = mask_structure(data_in)
+        record: Dict[str, Any] = {"ts": ts, "event": str(event), "data": masked_data}
+        if uid_hash:
+            record["user_id_hash"] = uid_hash
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception:

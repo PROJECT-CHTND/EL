@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+import os
 
 from ..schemas import Evidence, Hypothesis
 from ..monitoring.metrics import RETRIEVAL_CALLS
@@ -84,6 +85,27 @@ class KnowledgeIntegrator:
     def __init__(self, es_client: Any | None = None, qdrant_client: Any | None = None) -> None:
         self.es = es_client
         self.qdrant = qdrant_client
+        self._qdrant_ef: Optional[int] = None
+
+    def _load_qdrant_ef(self) -> Optional[int]:
+        # Read on each call to allow runtime changes without restart
+        # Try to locate repo root and then config/qdrant_ef.txt
+        here = os.path.abspath(__file__)
+        # walk up to 6 levels to find a 'config' dir
+        cur = os.path.dirname(here)
+        for _ in range(6):
+            cfg_candidate = os.path.join(cur, "config", "qdrant_ef.txt")
+            if os.path.isfile(cfg_candidate):
+                try:
+                    with open(cfg_candidate, "r", encoding="utf-8") as f:
+                        return int(f.read().strip())
+                except Exception:
+                    return None
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+        return None
 
     def integrate(self, hypothesis: Hypothesis, evidences: List[Evidence]) -> Hypothesis:
         # Note: current Hypothesis model does not keep evidences; integration is a no-op placeholder.
@@ -104,7 +126,18 @@ class KnowledgeIntegrator:
             try:
                 # Stub: vectorization not implemented; tests will monkeypatch .search
                 RETRIEVAL_CALLS.labels(stage="vector").inc()
-                vec_hits = list(self.qdrant.search(query_vector=[0.0, 0.0, 0.0], top_k=k_vec))
+                ef = self._load_qdrant_ef()
+                try:
+                    if ef is None:
+                        vec = self.qdrant.search(query_vector=[0.0, 0.0, 0.0], top_k=k_vec)
+                    else:
+                        vec = self.qdrant.search(
+                            query_vector=[0.0, 0.0, 0.0], top_k=k_vec, hnsw_ef=ef
+                        )
+                except TypeError:
+                    # Backward-compat: some stubs/clients may not accept hnsw_ef
+                    vec = self.qdrant.search(query_vector=[0.0, 0.0, 0.0], top_k=k_vec)
+                vec_hits = list(vec)
             except Exception:
                 vec_hits = []
 

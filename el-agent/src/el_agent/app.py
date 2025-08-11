@@ -9,6 +9,7 @@ from .schemas import Hypothesis, StrategistAction
 from .core.strategist import Strategist
 from .core.evaluator import update_belief
 from .core.orchestrator import write_wal_line
+from .utils.pii import mask_text
 from .monitoring.metrics import REQUEST_LATENCY, LLM_CALLS, RETRIEVAL_CALLS, HYPOTHESES_OPEN
 
 try:
@@ -166,16 +167,29 @@ def create_app() -> FastAPI:
         lines.append(paragraph)
 
         md = "\n".join(lines)
+        # マークダウン出力前にPIIマスキング
+        md = mask_text(md)
 
         # Write WAL lines for observability
         try:
             write_wal_line(
                 "respond.actions",
-                {"count": len(actions), "by_type": {a.action: sum(1 for x in actions if x.action == a.action) for a in actions}},
+                {
+                    "count": len(actions),
+                    "by_type": {a.action: sum(1 for x in actions if x.action == a.action) for a in actions},
+                    "user_msg": user_msg,
+                    # セッションIDが存在する場合はここに入れる（テスト環境では任意）
+                    "session_id": payload.get("session_id"),
+                },
             )
             write_wal_line(
                 "respond.hypotheses",
-                {"before": [h.model_dump() for h in items], "after": [h.model_dump() for h in updated]},
+                {
+                    "before": [h.model_dump() for h in items],
+                    "after": [h.model_dump() for h in updated],
+                    "user_msg": user_msg,
+                    "session_id": payload.get("session_id"),
+                },
             )
         except Exception:
             pass

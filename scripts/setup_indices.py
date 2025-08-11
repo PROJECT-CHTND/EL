@@ -3,7 +3,16 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Any, Dict
+from typing import Any, Dict, List
+
+
+def _load_lines(filepath: str) -> List[str]:
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f.readlines()]
+            return [ln for ln in lines if ln and not ln.startswith("#")]
+    except FileNotFoundError:
+        return []
 
 
 def create_elasticsearch_index(es_url: str, index_name: str) -> None:
@@ -20,14 +29,35 @@ def create_elasticsearch_index(es_url: str, index_name: str) -> None:
         print(f"[ES] Failed to check index existence: {e}")
         raise
 
+    # Load stopwords and synonyms from ops/
+    repo_root = os.path.dirname(os.path.dirname(__file__))
+    stopwords_path = os.path.join(repo_root, "ops", "es_stopwords.txt")
+    synonyms_path = os.path.join(repo_root, "ops", "es_synonyms.txt")
+    stopwords = _load_lines(stopwords_path)
+    synonyms = _load_lines(synonyms_path)
+
     settings: Dict[str, Any] = {
         "settings": {
             "number_of_shards": 1,
             "number_of_replicas": 0,
             "analysis": {
+                "filter": {
+                    "el_stop": {
+                        "type": "stop",
+                        "stopwords": stopwords or ["_english_"],
+                    },
+                    "el_synonyms": {
+                        "type": "synonym_graph",
+                        "synonyms": synonyms or ["ai, artificial intelligence"],
+                    },
+                },
                 "analyzer": {
-                    "default": {"type": "standard"}
-                }
+                    "el_analyzer": {
+                        "type": "custom",
+                        "tokenizer": "standard",
+                        "filter": ["lowercase", "el_stop", "el_synonyms"],
+                    }
+                },
             },
         },
         "mappings": {
@@ -35,8 +65,9 @@ def create_elasticsearch_index(es_url: str, index_name: str) -> None:
                 "title": {
                     "type": "text",
                     "fields": {"keyword": {"type": "keyword", "ignore_above": 256}},
+                    "analyzer": "el_analyzer",
                 },
-                "content": {"type": "text"},
+                "content": {"type": "text", "analyzer": "el_analyzer"},
                 "lang": {"type": "keyword"},
                 "url": {"type": "keyword"},
                 "created_at": {"type": "date"},
@@ -46,14 +77,17 @@ def create_elasticsearch_index(es_url: str, index_name: str) -> None:
     }
 
     try:
+        if client.indices.exists(index=index_name):  # type: ignore[attr-defined]
+            # Recreate to ensure analysis changes take effect
+            client.indices.delete(index=index_name)  # type: ignore[attr-defined]
+            print(f"[ES] Deleted existing index '{index_name}' to apply analysis changes")
         client.indices.create(index=index_name, body=settings)  # type: ignore[attr-defined]
-        print(f"[ES] Created index '{index_name}'")
-    except TransportError as te:  # pragma: no cover
-        if te.error == "resource_already_exists_exception":
-            print(f"[ES] Index '{index_name}' already exists – skipping")
-        else:
-            print(f"[ES] Failed to create index: {te}")
-            raise
+        print(
+            f"[ES] Created index '{index_name}' (synonyms={len(synonyms)}, stopwords={len(stopwords)})"
+        )
+    except Exception as te:  # pragma: no cover
+        print(f"[ES] Failed to create index: {te}")
+        raise
 
 
 def create_qdrant_collection(qdrant_url: str, collection_name: str, vector_size: int) -> None:
@@ -79,9 +113,6 @@ def create_qdrant_collection(qdrant_url: str, collection_name: str, vector_size:
         vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
         hnsw_config=HnswConfigDiff(m=16, ef_construct=200),
         optimizers_config=OptimizersConfigDiff(indexing_threshold=10000),
-        quantization_config=ProductQuantization(
-            product=ProductQuantizationConfig(compression="x8")
-        ),
     )
     print(f"[Qdrant] Created collection '{collection_name}' (dim={vector_size})")
 

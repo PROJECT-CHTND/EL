@@ -12,11 +12,11 @@ class ESClient:
     def search_bm25(self, index: str, query: str, size: int = 10) -> List[Dict[str, Any]]:
         body = {
             "query": {
-                "match": {
-                    "content": {
-                        "query": query,
-                        "operator": "and",
-                    }
+                "multi_match": {
+                    "query": query,
+                    "fields": ["title^2", "content"],
+                    "type": "best_fields",
+                    "operator": "and",
                 }
             }
         }

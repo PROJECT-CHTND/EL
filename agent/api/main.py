@@ -11,10 +11,13 @@ from agent.monitoring import attach_instrumentator
 from agent.models.context import ContextPayload
 from agent.slots import Slot
 from agent.models.kg import KGPayload
+from agent.models.fact import FactIn, Fact, ApproveRequest
+from agent.kg.client import Neo4jClient
 
 app = FastAPI(title="Implicit Knowledge Extraction Agent")
 
 router = APIRouter(prefix="/extract", tags=["extract"])
+kg_router = APIRouter(prefix="/kg", tags=["kg"])
 
 
 class ExtractRequest(BaseModel):
@@ -91,6 +94,23 @@ async def stream_pipeline(req: ExtractRequest) -> StreamingResponse:  # type: ig
 
 
 app.include_router(router)
+
+
+@kg_router.post("/submit", response_model=Fact, dependencies=[Depends(verify_jwt)])
+async def kg_submit(fact: FactIn) -> Fact:
+    client = Neo4jClient()
+    created = client.submit_fact(fact)
+    return created
+
+
+@kg_router.post("/approve", response_model=Fact, dependencies=[Depends(verify_jwt)])
+async def kg_approve(payload: ApproveRequest, token: dict = Depends(verify_jwt)) -> Fact:  # type: ignore[override]
+    approver = str(token.get("sub", "")) if isinstance(token, dict) else None
+    client = Neo4jClient()
+    updated = client.approve_fact(payload.fact_id, payload.decision, approver)
+    return updated
+
+app.include_router(kg_router)
 
 # Prometheus metrics
 try:
