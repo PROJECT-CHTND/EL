@@ -1,0 +1,64 @@
+version: 1
+goals:
+  - kind: daily_work
+    label_ja: 本日の業務
+    label_en: Today's work
+    match:
+      any_keywords:
+        - 業務
+        - 仕事
+        - 日報
+        - タスク
+        - 進捗
+        - today
+        - today's work
+        - task
+        - report
+    steps:
+      - id: what_is_subject
+        ja: "まず、今回の対象（例: EL bot）について、あなたの言葉で簡潔に教えてください。"
+        en: "First, in your own words, what is the subject (e.g., EL bot)?"
+      - id: today_projects
+        ja: "今日はどのプロジェクトに取り組みましたか？（例: 機能A / バグ修正B など）"
+        en: "Which projects did you work on today? (e.g., Feature A / Bugfix B)"
+      - id: today_tasks
+        ja: "具体的にどのタスクを実施しましたか？"
+        en: "Which concrete tasks did you complete today?"
+      - id: outcomes
+        ja: "成果物（PR、ドキュメント、デプロイ等）はありますか？"
+        en: "Any tangible outcomes (PRs, docs, deploys)?"
+      - id: blockers
+        ja: "詰まりや課題はありましたか？原因と対処を教えてください。"
+        en: "Any blockers? What caused them and how did you address them?"
+      - id: next_steps
+        ja: "次の一歩は何ですか？明日やることを一つだけ決めるとしたら？"
+        en: "What is the next step? If you pick one thing for tomorrow, what is it?"
+
+  - kind: requirements
+    label_ja: 要件整理
+    label_en: Requirements
+    match:
+      any_keywords:
+        - 仕様
+        - 要件
+        - 要件定義
+        - spec
+        - requirement
+    steps:
+      - id: scope
+        ja: "対象のスコープは何ですか？ユーザー/ユースケース/制約を教えてください。"
+        en: "What is the scope? Describe users/use-cases/constraints."
+      - id: success
+        ja: "成功の定義は何ですか？満たすべき受け入れ基準は？"
+        en: "What does success look like? What are the acceptance criteria?"
+      - id: risks
+        ja: "想定されるリスクや依存関係はありますか？"
+        en: "Any risks or dependencies to consider?"
+
+  - kind: generic
+    label_ja: 一般
+    label_en: Generic
+    match:
+      any_keywords: []
+    steps: []
+
