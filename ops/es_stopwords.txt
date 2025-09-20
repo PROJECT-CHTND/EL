@@ -1,0 +1,21 @@
+# example stopwords; customize per language as needed
+a
+an
+the
+and
+or
+but
+of
+in
+on
+for
+to
+with
+is
+are
+was
+were
+be
+been
+being
+

@@ -16,6 +16,24 @@
 | Stage⑥ Question Gen | スロットごとの質問をテンプレートベースで生成 |
 | Stage⑦ Question QA | specificity / tacit_power ≥ 0.7 の質問のみ採用 |
 
+## v2 – 実装済み機能の概要
+
+- **Core/Reasoning**
+  - Orchestrator による推論ループのWAL出力（`logs/wal/*.log`）。出力はPIIマスキング適用。
+  - Strategist: 不確実性と行動コストから `ask|search|none` を選択（停止しきい値あり）。
+  - KnowledgeIntegrator: Elasticsearch(BM25) と Qdrant(ベクトル) の RRF 融合、軽量リランキング、文単位抽出、`Evidence` 生成。
+  - Evaluator/Confidence: 特徴量（cosine, source_trust, recency, logic_ok, redundancy）から信頼度寄与を算出し、`belief` をロジット空間で更新。`config/weights/weights.json` または `EL_EVAL_WEIGHTS` による較正重み読込対応。
+- **LLM/Prompts**
+  - 仮説候補生成・エビデンス抽出・質問生成・文書合成・質問ストラテジスト・QAリファインをJSON厳守で実装。
+  - `EL_PROMPT_VARIANTS_DIR` 等で外部ファイルからプロンプト差し替え可能（ハードコード回避）。
+- **Retrieval/Stores**
+  - `ESClient`（BM25）、`QdrantStore`（HNSW/EF設定/バッチUpsert）、`Neo4jStore`、`RedisStore`。
+- **Monitoring/Security**
+  - Prometheusメトリクス（`/metrics`）：レイテンシ、LLMコール、リトリーバル段階別カウント等。
+  - JWT認証（Auth0想定、RS256）。PIIマスキング（メール/電話/住所のトークン化、`user_id_hash`）。
+
+詳細は `IMPLEMENTATION_PLAN.md` と `docs/OPERATIONS.md` を参照してください。
+
 ### ディレクトリ構成 (抜粋)
 
 ```
@@ -30,11 +48,25 @@ agent/
 tests/            # pytest によるユニットテスト
 ```
 
+```
+el-agent/
+  src/el_agent/
+    core/         # v2: orchestrator / knowledge_integrator / strategist / evaluator
+    llm/          # v2: prompts（外部差し替え対応）, OpenAI クライアント
+    monitoring/   # v2: Prometheus メトリクス
+    stores/       # v2: neo4j / qdrant / redis ストア
+    retrieval/    # v2: Elasticsearch クライアント
+```
+
 ### エンドポイント
 
 | Method | Path | 説明 |
 |--------|------|------|
-| POST | `/extract` | Stage①–③ (現在は②まで) を実行し、`KGPayload` を返却 |
+| POST | `/extract` | 抽出（Stage②）を実行し、`KGPayload` を返却（JWT必須） |
+| POST | `/stream_pipeline` | context → extract → slots の進捗をSSEで返却（JWT必須） |
+| POST | `/kg/submit` | KG 事実の登録（JWT必須） |
+| POST | `/kg/approve` | KG 事実の承認（JWT必須） |
+| GET | `/metrics` | Prometheus メトリクスのエンドポイント |
 
 ### 依存関係のインストール
 
@@ -51,7 +83,20 @@ NEO4J_USER="neo4j"
 NEO4J_PASSWORD="password"
 REDIS_URL="redis://localhost:6379"          # 任意
 AUTO_INGEST_NEO4J="1"                      # 自動マージを有効化
+AUTH0_DOMAIN="your-tenant.auth0.com"        # JWT検証
+AUTH0_AUDIENCE="https://api.example.com"    # JWT検証
+PII_SALT="random_salt"                      # PIIマスキング
+EL_EVAL_WEIGHTS="/absolute/path/to/config/weights/weights.json"  # 任意: 評価器の較正重み
+EL_PROMPT_VARIANTS_DIR="/absolute/path/to/prompts"               # 任意: プロンプト差し替え
 ```
+
+### サーバ起動（例）
+
+```bash
+uvicorn agent.api.main:app --reload
+```
+
+Swagger: `http://localhost:8000/docs`
 
 ### テスト
 
