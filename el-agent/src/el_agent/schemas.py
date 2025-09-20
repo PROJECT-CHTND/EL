@@ -44,8 +44,18 @@ class Hypothesis(BaseModel):
     @field_validator("action_cost")
     @classmethod
     def _clamp_action_cost(cls, v: Dict[str, float]) -> Dict[str, float]:
-        ask = _clamp01(v.get("ask", 0.0))
-        search = _clamp01(v.get("search", 0.0))
+        # 下限のみ0.0にクリップ。上限は外して大きなコストを許容（stop判定用）。
+        def _nz(x: float) -> float:
+            try:
+                xf = float(x)
+            except Exception:
+                xf = 0.0
+            return xf if xf > 0.0 else 0.0
+
+        ask_raw = v.get("ask", 0.0)
+        search_raw = v.get("search", 0.0)
+        ask = _nz(ask_raw)
+        search = _nz(search_raw)
         return {"ask": ask, "search": search}
 
     @field_validator("status")

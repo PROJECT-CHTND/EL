@@ -20,7 +20,8 @@ def test_hypothesis_clamps_and_ci_order():
     assert h.belief == 1.0
     assert h.belief_ci == (0.0, 0.9)
     assert h.novelty == 0.0
-    assert h.action_cost == {"ask": 1.0, "search": 0.0}
+    # action_cost は下限0.0のみクリップ、上限はそのまま許容
+    assert h.action_cost == {"ask": 2.0, "search": 0.0}
 
 
 def test_hypothesis_status_validation():
