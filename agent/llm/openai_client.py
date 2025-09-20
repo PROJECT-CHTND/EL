@@ -25,13 +25,14 @@ class OpenAIClient:
     later as needed.
     """
 
-    def __init__(self, model: str = "gpt-4o") -> None:
+    def __init__(self, model: str | None = None) -> None:
         api_key = os.getenv("OPENAI_API_KEY", "DUMMY_KEY_FOR_TESTS")
+        model = model or os.getenv("OPENAI_MODEL", "gpt-4o")
         
         # Lazily create client only when real key is provided
         self._api_key = api_key
         self._client = None
-        self.model = model
+        self.model = str(model)
 
     @property
     def client(self):  # noqa: D401
@@ -54,14 +55,28 @@ class OpenAIClient:
         """Invoke the ChatCompletion endpoint and return the first choice."""
 
         try:
-            response = await openai.ChatCompletion.acreate(  # type: ignore[attr-defined]
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-                functions=functions,
-                function_call=function_call,
-                logprobs=logprobs,
-            )
+            # Prefer new client if available
+            if hasattr(openai, "AsyncOpenAI"):
+                client = self.client
+                if client is None:
+                    raise RuntimeError("OpenAI client not initialised (missing API key)")
+                response = await client.chat.completions.create(  # type: ignore[attr-defined]
+                    model=self.model,
+                    messages=messages,
+                    temperature=temperature,
+                    functions=functions,
+                    function_call=function_call,
+                    logprobs=logprobs,
+                )
+            else:
+                response = await openai.ChatCompletion.acreate(  # type: ignore[attr-defined]
+                    model=self.model,
+                    messages=messages,
+                    temperature=temperature,
+                    functions=functions,
+                    function_call=function_call,
+                    logprobs=logprobs,
+                )
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"OpenAI API error: {exc}") from exc
 

@@ -16,8 +16,8 @@ goals:
         - report
     steps:
       - id: what_is_subject
-        ja: "まず、今回の対象（例: EL bot）について、あなたの言葉で簡潔に教えてください。"
-        en: "First, in your own words, what is the subject (e.g., EL bot)?"
+        ja: "まず、今回の対象（例: プロダクトや取り組み）について、あなたの言葉で簡潔に教えてください。"
+        en: "First, in your own words, what is the subject (e.g., a product or initiative)?"
       - id: today_projects
         ja: "今日はどのプロジェクトに取り組みましたか？（例: 機能A / バグ修正B など）"
         en: "Which projects did you work on today? (e.g., Feature A / Bugfix B)"

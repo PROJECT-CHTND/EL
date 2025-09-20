@@ -49,8 +49,49 @@ except Exception:
 # 環境変数読み込み
 load_dotenv()
 
-# OpenAI設定
-client = openai.AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# OpenAI設定（テスト互換の軽量シム）
+class _ShimCompletions:
+    def __init__(self, parent: "_ShimClient"):
+        self._parent = parent
+
+    async def create(self, *args, **kwargs):
+        # 実行時にだけ本物のクライアントへ委譲（テストでは monkeypatch で差し替え）
+        if self._parent._real is None:
+            self._parent._real = openai.AsyncOpenAI(api_key=self._parent._api_key)
+        return await self._parent._real.chat.completions.create(*args, **kwargs)
+
+
+class _ShimChat:
+    def __init__(self, parent: "_ShimClient"):
+        self.completions = _ShimCompletions(parent)
+
+
+class _ShimClient:
+    def __init__(self, api_key: str | None):
+        self._api_key = api_key or ""
+        self._real = None  # 遅延初期化
+        self.chat = _ShimChat(self)  # 安定オブジェクト
+
+
+client = _ShimClient(os.getenv("OPENAI_API_KEY"))
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+
+# OpenAI呼び出しの安全ラッパ（temperature非対応モデルへのフォールバック）
+async def safe_chat_completion(*, messages, temperature=None, response_format=None, **extra):
+    kwargs = {"model": OPENAI_MODEL, "messages": messages, **extra}
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    try:
+        return await client.chat.completions.create(**kwargs)
+    except Exception as e:
+        msg = str(e)
+        # 一部モデル(gpt-5系など)は temperature 固定のため温度を外して再試行
+        if ("Unsupported value" in msg or "unsupported_value" in msg) and "temperature" in msg:
+            kwargs.pop("temperature", None)
+            return await client.chat.completions.create(**kwargs)
+        raise
 
 # el-agent の必須化フラグ（デフォルト: 必須）
 EL_AGENT_REQUIRED = os.getenv("EL_AGENT_REQUIRED", "1") == "1"
@@ -179,7 +220,7 @@ async def start_exploration(ctx, *, topic: Optional[str] = None):
     if EL_AGENT_REQUIRED and not agent_runtime.available:
         await ctx.send("❌ el-agent が利用できません。`el-agent/src` の配置と依存を確認してください（必要なら EL_AGENT_REQUIRED=0 でフォールバック可）。")
         return
-
+    
     # セッション作成
     session = ThinkingSession(user_id, topic, thread.id, session_language)
     bot.sessions[user_id] = session
@@ -198,33 +239,8 @@ async def start_exploration(ctx, *, topic: Optional[str] = None):
         except Exception:
             session.hypothesis = None
     
-    # ウェルカムメッセージ
-    welcome_title = "🌱 Let's Begin the Exploration" if session.language == "English" else "🌱 探求の開始"
-    welcome_desc = f"Let's think together about \"**{topic}**\"." if session.language == "English" else f"「**{topic}**」について一緒に考えていきましょう。"
-    
-    embed = discord.Embed(
-        title=welcome_title,
-        description=welcome_desc,
-        color=discord.Color.green()
-    )
+    # 最初の定型メッセージは送らず、以降はスレッド内で会話
 
-    about_title = "💡 About this session" if session.language == "English" else "💡 このセッションについて"
-    about_value = (
-        "I'm here to help you explore your thoughts.\n"
-        "There's no need to rush for an answer.\n"
-        "Please feel free to speak your mind."
-    ) if session.language == "English" else (
-        "私はあなたの考えを引き出すお手伝いをします。\n"
-        "答えを急ぐ必要はありません。\n"
-        "思いつくままに、自由にお話しください。"
-    )
-    embed.add_field(name=about_title, value=about_value, inline=False)
-    
-    footer_text = "When you're ready, please reply in the thread." if session.language == "English" else "準備ができたら、スレッド内でお返事ください"
-    embed.set_footer(text=footer_text)
-    
-    await ctx.send(embed=embed)
-    
     # LLMでゴール種別を推定（任意）
     if GOAL_CLASSIFIER and _PLANNER_SPEC.get("goals"):
         try:
@@ -232,8 +248,7 @@ async def start_exploration(ctx, *, topic: Optional[str] = None):
             sys_prompt = (_JOURNALIST_SPEC.get("goal_classifier", {}) or {}).get("system_prompt", "")
             if sys_prompt:
                 sys_prompt = sys_prompt.replace("{{ kinds_csv }}", kinds_csv)
-                resp = await client.chat.completions.create(
-                    model="gpt-4o",
+                resp = await safe_chat_completion(
                     messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": topic}],
                     temperature=0.0,
                     response_format={"type": "json_object"},
@@ -245,7 +260,7 @@ async def start_exploration(ctx, *, topic: Optional[str] = None):
                     session.goal_kind = picked
         except Exception:
             pass
-
+    
     # 最初の質問
     first_question = await generate_opening_question(topic, session.language)
     session.last_question = first_question # 最初の質問を保存
@@ -467,8 +482,7 @@ async def on_message(message: discord.Message):
                         ref_sys = (_JOURNALIST_SPEC.get("question_refiner", {}) or {}).get("system_prompt", "")
                         if ref_sys:
                             ref_sys = ref_sys.replace("{{ goal_kind }}", session.goal_kind).replace("{{ language }}", session.language)
-                            r = await client.chat.completions.create(
-                                model="gpt-4o",
+                            r = await safe_chat_completion(
                                 messages=[
                                     {"role": "system", "content": ref_sys},
                                     {"role": "user", "content": next_question_text},
@@ -491,8 +505,7 @@ async def on_message(message: discord.Message):
                             emp_sys = emp_sys.replace("{{ goal_kind }}", session.goal_kind).replace("{{ language }}", session.language)
                             turn_sys = turn_sys.replace("{{ goal_kind }}", session.goal_kind).replace("{{ language }}", session.language)
                             # 共感前置き生成
-                            e = await client.chat.completions.create(
-                                model="gpt-4o",
+                            e = await safe_chat_completion(
                                 messages=[
                                     {"role": "system", "content": emp_sys},
                                     {"role": "user", "content": message.content},
@@ -501,8 +514,7 @@ async def on_message(message: discord.Message):
                             )
                             preface = (e.choices[0].message.content or "").strip()
                             # 結合最適化
-                            t = await client.chat.completions.create(
-                                model="gpt-4o",
+                            t = await safe_chat_completion(
                                 messages=[
                                     {"role": "system", "content": turn_sys},
                                     {"role": "user", "content": f"Preface: {preface}\nQuestion: {refined_question}"},
@@ -572,8 +584,7 @@ async def generate_opening_question(topic: str, lang: str) -> str:
         system_prompt_tpl: str = data.get("system_opening_prompt", "")
         system_prompt = system_prompt_tpl.format(language=lang)
 
-        response = await client.chat.completions.create(
-            model="gpt-4o",
+        response = await safe_chat_completion(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Topic: {topic}"},
@@ -674,8 +685,25 @@ def plan_next_question(session: ThinkingSession, last_user_msg: str) -> Optional
         sid = str(step.get("id"))
         if sid not in asked:
             asked.add(sid)
-            text = step.get(lang_key) or step.get("en") or step.get("ja")
-            return str(text)
+            text = step.get(lang_key) or step.get("en") or step.get("ja") or ""
+
+            # プレースホルダを安全に置換（未定義キーはそのまま残す）
+            try:
+                class _SafeDict(dict):
+                    def __missing__(self, key):  # type: ignore[no-redef]
+                        return "{" + key + "}"
+
+                variables = _SafeDict(
+                    topic=session.topic or "",
+                    last_answer=last_user_msg or "",
+                    goal_kind=kind or "",
+                    language=session.language or "",
+                )
+                rendered = str(text).format_map(variables)
+            except Exception:
+                rendered = str(text)
+
+            return rendered
     return None
 
 async def analyze_and_respond(session: ThinkingSession) -> dict:
@@ -748,8 +776,7 @@ async def analyze_and_respond_legacy(session: ThinkingSession) -> dict:
         messages.append({"role": "user", "content": exchange['answer']})
     
     try:
-        response = await client.chat.completions.create(
-            model="gpt-4o",
+        response = await safe_chat_completion(
             messages=messages,
             temperature=0.8,
             response_format={"type": "json_object"}
@@ -772,8 +799,7 @@ async def generate_reflection(session: ThinkingSession) -> dict:
     }
     
     try:
-        response = await client.chat.completions.create(
-            model="gpt-4o",
+        response = await safe_chat_completion(
             messages=[{"role": "system", "content": prompt_text[session.language]}],
             temperature=0.7,
             response_format={"type": "json_object"}
@@ -803,8 +829,7 @@ async def generate_rag_data(session: ThinkingSession) -> List[Dict[str, Any]]:
     messages: List[ChatCompletionMessageParam] = [{"role": "system", "content": prompt}]
 
     try:
-        response = await client.chat.completions.create(
-            model="gpt-4o",
+        response = await safe_chat_completion(
             messages=messages,
             temperature=0.3,
             response_format={"type": "json_object"}
