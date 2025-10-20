@@ -6,6 +6,8 @@ from nani_bot import generate_opening_question, analyze_and_respond, ThinkingSes
 
 from agent.slots import Slot
 from agent.models.question import Question
+from agent.models.kg import KGPayload
+from agent.slots.postmortem import fallback_question
 
 # -----------------------------
 # helper mocks
@@ -77,3 +79,47 @@ async def test_analyze_and_respond(monkeypatch):
     assert "next_questions" in result
     assert result["next_questions"]
     assert isinstance(result["next_questions"][0]["question"], str)
+
+
+@pytest.mark.asyncio
+async def test_postmortem_gap_loop(monkeypatch):
+    """Postmortem sessions should progress through critical slots."""
+    import nani_bot as nb
+
+    session = ThinkingSession("user2", "昨日の障害を振り返りたい", 456, "Japanese")
+    assert session.goal_kind == "postmortem"
+
+    summary_question = fallback_question("summary", session.language)
+    summary_answer = "昨日14:30の決済障害で約2時間停止し、ユーザーの35%が失敗しました。"
+    session.pending_slot = "summary"
+    session.last_question = summary_question
+    session.add_exchange(summary_question, summary_answer)
+    session.slot_registry.update("summary", value=summary_answer, filled_ratio=1.0)
+    session.goal_state.setdefault("filled", {})["summary"] = summary_answer
+    session.slot_answers.setdefault("summary", []).append(summary_answer)
+    session.pending_slot = None
+
+    async def _mock_extract(text: str, **kwargs):  # noqa: ANN001
+        return KGPayload(entities=[], relations=[])
+
+    def _mock_merge(payload, **kwargs):  # noqa: ANN001
+        return payload
+
+    async def _mock_generate(slots, **kwargs):  # noqa: ANN001
+        slot = slots[0]
+        return [Question(slot_name=slot.name, text="影響はどのくらいでしたか？", specificity=0.9, tacit_power=0.9)]
+
+    async def _mock_validate(questions):  # noqa: ANN001
+        return questions
+
+    monkeypatch.setattr(nb, "extract_knowledge", _mock_extract, raising=True)
+    monkeypatch.setattr(nb, "merge_and_persist", _mock_merge, raising=True)
+    monkeypatch.setattr(nb, "generate_questions", _mock_generate, raising=True)
+    monkeypatch.setattr(nb, "return_validated_questions", _mock_validate, raising=True)
+
+    result = await analyze_and_respond(session)
+
+    assert result["status"] == "continue"
+    assert result["next_questions"]
+    assert result["next_questions"][0]["slot_name"] == "impact"
+    assert session.pending_slot == "impact"
