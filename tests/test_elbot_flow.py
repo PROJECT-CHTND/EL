@@ -123,3 +123,48 @@ async def test_postmortem_gap_loop(monkeypatch):
     assert result["next_questions"]
     assert result["next_questions"][0]["slot_name"] == "impact"
     assert session.pending_slot == "impact"
+
+
+@pytest.mark.asyncio
+async def test_postmortem_gap_loop_mismatched_slot(monkeypatch):
+    """Fallback question should be used when qgen returns mismatched slot."""
+    import nani_bot as nb
+
+    session = ThinkingSession("user3", "障害", 789, "Japanese")
+    assert session.goal_kind == "postmortem"
+
+    summary_question = fallback_question("summary", session.language)
+    summary_answer = "14:30 に決済APIで障害が発生し、2時間停止しました。"
+    session.pending_slot = "summary"
+    session.last_question = summary_question
+    session.add_exchange(summary_question, summary_answer)
+    session.slot_registry.update("summary", value=summary_answer, filled_ratio=1.0)
+    session.goal_state.setdefault("filled", {})["summary"] = summary_answer
+    session.slot_answers.setdefault("summary", []).append(summary_answer)
+    session.pending_slot = None
+
+    async def _mock_extract(text: str, **kwargs):  # noqa: ANN001
+        return KGPayload(entities=[], relations=[])
+
+    def _mock_merge(payload, **kwargs):  # noqa: ANN001
+        return payload
+
+    async def _mock_generate(slots, **kwargs):  # noqa: ANN001
+        return [Question(slot_name="unrelated", text="別の質問", specificity=0.9, tacit_power=0.9)]
+
+    async def _mock_validate(questions):  # noqa: ANN001
+        return questions
+
+    monkeypatch.setattr(nb, "extract_knowledge", _mock_extract, raising=True)
+    monkeypatch.setattr(nb, "merge_and_persist", _mock_merge, raising=True)
+    monkeypatch.setattr(nb, "generate_questions", _mock_generate, raising=True)
+    monkeypatch.setattr(nb, "return_validated_questions", _mock_validate, raising=True)
+
+    result = await analyze_and_respond(session)
+
+    assert result["status"] == "continue"
+    assert result["next_questions"]
+    next_q = result["next_questions"][0]
+    assert next_q["slot_name"] == "impact"
+    assert next_q["question"] == fallback_question("impact", session.language)
+    assert session.pending_slot == "impact"

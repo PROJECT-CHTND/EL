@@ -64,12 +64,28 @@ class SlotRegistry:
 
         ts = timestamp if timestamp is not None else time.time()
         new_ratio = max(slot.filled_ratio, min(1.0, filled_ratio))
+
+        updated_value = value if value is not None else slot.value
+        updated_source = source_kind or slot.source_kind
+
+        updated_evidence = list(slot.evidence_ids)
+        if evidence_ids is not None:
+            for evid in evidence_ids:
+                if evid not in updated_evidence:
+                    updated_evidence.append(evid)
+
+        should_refresh_ts = new_ratio > slot.filled_ratio
+        if not should_refresh_ts and updated_value is not None and updated_value != slot.value:
+            should_refresh_ts = True
+        if not should_refresh_ts and evidence_ids:
+            should_refresh_ts = True
+
         update_payload = {
             "filled_ratio": new_ratio,
-            "last_filled_ts": ts if new_ratio > slot.filled_ratio else slot.last_filled_ts,
-            "value": value if value is not None else slot.value,
-            "source_kind": source_kind or slot.source_kind,
-            "evidence_ids": evidence_ids if evidence_ids is not None else slot.evidence_ids,
+            "last_filled_ts": ts if should_refresh_ts else slot.last_filled_ts,
+            "value": updated_value,
+            "source_kind": updated_source,
+            "evidence_ids": updated_evidence,
         }
         updated = slot.model_copy(update=update_payload)
         self._slots[name] = updated

@@ -838,20 +838,22 @@ async def _run_postmortem_turn(session: ThinkingSession) -> dict:
             print(f"[Postmortem] return_validated_questions failed: {exc}")
 
     chosen: Question | None = None
-    if validated:
-        chosen = validated[0]
-    elif questions:
-        chosen = questions[0]
+    candidate_pool: List[Question] = validated if validated else questions
+    fallback = fallback_question(next_slot.name, session.language)
 
-    if chosen is None or not (chosen.text or "").strip():
-        fallback = fallback_question(next_slot.name, session.language)
-        chosen = Question(slot_name=next_slot.name, text=fallback, specificity=1.0, tacit_power=1.0)
-    else:
-        fallback = fallback_question(next_slot.name, session.language)
-        text = chosen.text.strip()
+    for candidate in candidate_pool:
+        if candidate.slot_name and candidate.slot_name != next_slot.name:
+            continue
+        text = (candidate.text or "").strip()
         if not text:
-            text = fallback
-            chosen = chosen.model_copy(update={"text": text})
+            continue
+        if candidate.slot_name is None:
+            candidate = candidate.model_copy(update={"slot_name": next_slot.name})
+        chosen = candidate if text == candidate.text else candidate.model_copy(update={"text": text})
+        break
+
+    if chosen is None:
+        chosen = Question(slot_name=next_slot.name, text=fallback, specificity=1.0, tacit_power=1.0)
 
     session.pending_slot = next_slot.name
 
