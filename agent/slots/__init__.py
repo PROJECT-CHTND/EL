@@ -74,11 +74,11 @@ class SlotRegistry:
                 if evid not in updated_evidence:
                     updated_evidence.append(evid)
 
-        should_refresh_ts = new_ratio > slot.filled_ratio
-        if not should_refresh_ts and updated_value is not None and updated_value != slot.value:
-            should_refresh_ts = True
-        if not should_refresh_ts and evidence_ids:
-            should_refresh_ts = True
+        should_refresh_ts = (
+            new_ratio > slot.filled_ratio
+            or (updated_value is not None and updated_value != slot.value)
+            or bool(evidence_ids)
+        )
 
         update_payload = {
             "filled_ratio": new_ratio,
