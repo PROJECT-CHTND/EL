@@ -847,9 +847,12 @@ async def _run_postmortem_turn(session: ThinkingSession) -> dict:
         text = (candidate.text or "").strip()
         if not text:
             continue
+        update = {}
         if candidate.slot_name is None:
-            candidate = candidate.model_copy(update={"slot_name": next_slot.name})
-        chosen = candidate if text == candidate.text else candidate.model_copy(update={"text": text})
+            update["slot_name"] = next_slot.name
+        if text != candidate.text:
+            update["text"] = text
+        chosen = candidate.model_copy(update=update) if update else candidate
         break
 
     if chosen is None:
