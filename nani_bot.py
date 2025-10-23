@@ -278,7 +278,7 @@ async def start_exploration(ctx, *, topic: Optional[str] = None):
         except Exception:
             pass
 
-    session.configure_slots(session.goal_kind)
+    # session.configure_slots(session.goal_kind)  # Removed redundant call
 
     # 最初の質問
     first_question = await generate_opening_question(topic, session.language, session.goal_kind)
