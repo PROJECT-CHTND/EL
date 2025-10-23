@@ -806,8 +806,6 @@ async def _run_postmortem_turn(session: ThinkingSession) -> dict:
     ranked_slots = analyze_gaps(session.slot_registry, kg)
     next_slot: Optional[Slot] = None
     for slot, priority in ranked_slots:
-        if slot.filled:
-            continue
         if priority <= 0:
             continue
         next_slot = slot
