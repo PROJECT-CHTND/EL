@@ -15,11 +15,14 @@ import yaml  # type: ignore
 from agent.pipeline.stage02_extract import extract_knowledge
 from agent.pipeline.stage03_merge import merge_and_persist
 from agent.pipeline.stage04_slots import propose_slots
+from agent.pipeline.stage05_gap import analyze_gaps
 from agent.pipeline.stage06_qgen import generate_questions
 from agent.pipeline.stage07_qcheck import return_validated_questions
 from agent.pipeline.runner import run_turn
 from agent.models.question import Question
-from agent.stores.sqlite_store import SqliteSessionRepository
+from agent.models.kg import KGPayload
+from agent.slots import Slot, SlotRegistry
+from agent.slots.postmortem import build_postmortem_registry, fallback_question
 
 import asyncio
 import io
@@ -175,7 +178,7 @@ class ThinkingSession:
         self.insights: List[Any] = []
         self.phase = "introduction"
         self.last_question: Optional[str] = None
-        self.db_session_id: Optional[int] = None
+        self.pending_slot: Optional[str] = None
         # el-agent 連携用の状態
         self.hypothesis: Optional["Hypothesis"] = None  # type: ignore[name-defined]
         self.belief: float = 0.5
@@ -186,13 +189,25 @@ class ThinkingSession:
         # ゴール指向プランニング
         self.goal_kind: str = infer_goal_kind(topic)
         self.goal_state: Dict[str, Any] = {"asked": set(), "filled": {}}
-        
+        self.slot_registry: SlotRegistry = SlotRegistry()
+        self.slot_answers: Dict[str, List[str]] = {}
+        self.configure_slots(self.goal_kind)
+
     def add_exchange(self, question: str, answer: str):
         self.messages.append({
             "timestamp": datetime.now().isoformat(),
             "question": question,
             "answer": answer
         })
+
+    def configure_slots(self, goal_kind: str) -> None:
+        self.goal_kind = goal_kind
+        if goal_kind == "postmortem":
+            self.slot_registry = build_postmortem_registry()
+        else:
+            self.slot_registry = SlotRegistry()
+        self.pending_slot = None
+        self.slot_answers = {}
 
 @bot.command(name='explore')
 async def start_exploration(ctx, *, topic: Optional[str] = None):
@@ -280,11 +295,15 @@ async def start_exploration(ctx, *, topic: Optional[str] = None):
                     session.goal_kind = picked
         except Exception:
             pass
-    
+
+    # session.configure_slots(session.goal_kind)  # Removed redundant call
+
     # 最初の質問
-    first_question = await generate_opening_question(topic, session.language)
-    session.last_question = first_question # 最初の質問を保存
-    
+    first_question = await generate_opening_question(topic, session.language, session.goal_kind)
+    session.last_question = first_question  # 最初の質問を保存
+    if session.goal_kind == "postmortem":
+        session.pending_slot = "summary"
+
     q_embed = discord.Embed(
         description=first_question,
         color=discord.Color.blue()
@@ -423,15 +442,14 @@ async def on_message(message: discord.Message):
         
     # 今回のやり取りを履歴に追加
     session.add_exchange(session.last_question, message.content)
-    # 永続化（Q→A）
-    if session.db_session_id is not None:
-        try:
-            ts_now = datetime.now().isoformat()
-            await bot.session_repo.add_message(session_id=session.db_session_id, ts_iso=ts_now, role="assistant", text=session.last_question or "")
-            await bot.session_repo.add_message(session_id=session.db_session_id, ts_iso=ts_now, role="user", text=message.content)
-        except Exception:
-            pass
-    
+
+    if session.pending_slot:
+        slot_name = session.pending_slot
+        session.slot_registry.update(slot_name, value=message.content, source_kind="user")
+        session.goal_state.setdefault("filled", {})[slot_name] = message.content
+        session.slot_answers.setdefault(slot_name, []).append(message.content)
+        session.pending_slot = None
+
     # el-agent が必須かつ未利用可能なら即エラーを返す
     if EL_AGENT_REQUIRED and not agent_runtime.available:
         await message.reply("❌ el-agent が利用できません。`el-agent/src` の配置と依存を確認してください（必要なら EL_AGENT_REQUIRED=0 でフォールバック可）。")
@@ -585,15 +603,51 @@ async def on_message(message: discord.Message):
         # --- 従来（v1）経路 ---
         response = await analyze_and_respond(session)
         questions = response.get('next_questions', [])
+        status = response.get('status')
         if questions:
             selected_q_obj = questions[0]
+            question_text = selected_q_obj.get('question', '')
+            slot_name = selected_q_obj.get('slot_name')
             embed = discord.Embed(
-                description=selected_q_obj['question'],
+                description=question_text,
                 color=discord.Color.blue()
             )
             embed.set_author(name=("🔎 Next Question" if session.language == "English" else "🔎 次の質問"))
             await message.reply(embed=embed)
-            session.last_question = selected_q_obj['question']
+            session.last_question = question_text
+            if slot_name:
+                session.pending_slot = slot_name
+        elif status == "complete":
+            summary_items = response.get("slot_summary") or []
+            if not summary_items:
+                summary_items = [
+                    {
+                        "slot": slot.name,
+                        "value": slot.value,
+                        "filled": slot.filled,
+                    }
+                    for slot in session.slot_registry.all_slots()
+                ]
+            lines = []
+            for item in summary_items:
+                mark = "✅" if item.get("filled") else "⚠️"
+                value = (item.get("value") or "").strip() or ("No detail provided" if session.language == "English" else "記録なし")
+                lines.append(f"{mark} {item.get('slot')}: {value[:160]}")
+            description = "\n".join(lines) or ("All critical slots are filled." if session.language == "English" else "主要スロットはすべて充足しました。")
+            embed = discord.Embed(description=description, color=discord.Color.green())
+            embed.set_author(name=("✅ Postmortem coverage" if session.language == "English" else "✅ ポストモーテムの準備完了"))
+            await message.reply(embed=embed)
+            session.last_question = None
+            session.pending_slot = None
+        elif status == "stalled":
+            missing = response.get("missing_slots") or [slot.name for slot in session.slot_registry.unfilled_slots()]
+            if session.language == "English":
+                text = "I'm pausing for now. Remaining slots: " + ", ".join(missing)
+            else:
+                text = "一旦ここで止めます。未充足のスロット: " + "、".join(missing)
+            await message.reply(text)
+            session.last_question = None
+            session.pending_slot = None
         else:
             fallback_q = "That's interesting. Could you elaborate on that a bit more?" if session.language == "English" else "興味深いですね。もう少し詳しく教えていただけますか？"
             await message.reply(fallback_q)
@@ -601,10 +655,13 @@ async def on_message(message: discord.Message):
 
 
 # Opening Question generator using external prompt
-async def generate_opening_question(topic: str, lang: str) -> str:
+async def generate_opening_question(topic: str, lang: str, goal_kind: str = "generic") -> str:
     """Generate the very first question for a given topic using an external prompt file.
     Falls back to the legacy rule-based function if the LLM fails.
     """
+
+    if goal_kind == "postmortem":
+        return fallback_question("summary", lang)
     try:
         prompt_path = Path(__file__).parent / "agent" / "prompts" / "opening.yaml"
         with prompt_path.open("r", encoding="utf-8") as f:
@@ -627,11 +684,14 @@ async def generate_opening_question(topic: str, lang: str) -> str:
     except Exception as exc:  # noqa: BLE001
         # Fallback to deterministic rule-based question
         print(f"[OpeningQ] Fallback due to: {exc}")
-        return get_opening_question(topic, lang)
+        return get_opening_question(topic, lang, goal_kind)
 
 # ヘルパー関数
-def get_opening_question(topic: str, lang: str) -> str:
+def get_opening_question(topic: str, lang: str, goal_kind: str = "generic") -> str:
     """トピックに応じた知識を活用した最初の質問を生成"""
+
+    if goal_kind == "postmortem":
+        return fallback_question("summary", lang)
     topic_lower = topic.lower()
 
     if lang == "Japanese":
@@ -735,7 +795,102 @@ def plan_next_question(session: ThinkingSession, last_user_msg: str) -> Optional
     return None
 
 async def analyze_and_respond(session: ThinkingSession) -> dict:
-    """Generate the next question(s) via runner.run_turn; fallback to legacy method."""
+    """Dispatch analyze-and-respond flow based on session goal."""
+
+    if session.goal_kind == "postmortem" and session.slot_registry.all_slots():
+        return await _run_postmortem_turn(session)
+    return await _analyze_and_respond_generic(session)
+
+
+async def _run_postmortem_turn(session: ThinkingSession) -> dict:
+    """Gap-driven loop for postmortem sessions (M1a scope)."""
+
+    if not session.messages:
+        raise ValueError("No previous messages recorded")
+
+    answer_text: str = session.messages[-1]["answer"]
+
+    try:
+        kg = await extract_knowledge(answer_text, focus=session.topic)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Postmortem] extract_knowledge failed: {exc}")
+        kg = KGPayload(entities=[], relations=[])
+
+    try:
+        merge_and_persist(kg)
+    except Exception as merge_err:  # noqa: BLE001
+        print(f"[Postmortem] merge_and_persist failed: {merge_err}")
+
+    ranked_slots = analyze_gaps(session.slot_registry, kg)
+    next_slot: Optional[Slot] = None
+    for slot, priority in ranked_slots:
+        if priority <= 0:
+            continue
+        next_slot = slot
+        break
+
+    if next_slot is None:
+        if session.slot_registry.is_all_filled():
+            summary = [
+                {"slot": slot.name, "value": slot.value, "filled": slot.filled}
+                for slot in session.slot_registry.all_slots()
+            ]
+            return {"next_questions": [], "status": "complete", "slot_summary": summary}
+
+        missing = [slot.name for slot in session.slot_registry.unfilled_slots()]
+        return {"next_questions": [], "status": "stalled", "missing_slots": missing}
+
+    questions: List[Question] = []
+    try:
+        questions = await generate_questions([next_slot])
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Postmortem] generate_questions failed: {exc}")
+
+    validated: List[Question] = []
+    if questions:
+        try:
+            validated = await return_validated_questions(questions)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Postmortem] return_validated_questions failed: {exc}")
+
+    chosen: Question | None = None
+    candidate_pool: List[Question] = validated if validated else questions
+    fallback = fallback_question(next_slot.name, session.language)
+
+    for candidate in candidate_pool:
+        if candidate.slot_name and candidate.slot_name != next_slot.name:
+            continue
+        text = (candidate.text or "").strip()
+        if not text:
+            continue
+        update = {}
+        if candidate.slot_name is None:
+            update["slot_name"] = next_slot.name
+        if text != candidate.text:
+            update["text"] = text
+        chosen = candidate.model_copy(update=update) if update else candidate
+        break
+
+    if chosen is None:
+        chosen = Question(slot_name=next_slot.name, text=fallback, specificity=1.0, tacit_power=1.0)
+
+    session.pending_slot = next_slot.name
+
+    return {
+        "next_questions": [
+            {
+                "level": 2,
+                "type": "clarifying",
+                "question": chosen.text,
+                "slot_name": next_slot.name,
+            }
+        ],
+        "status": "continue",
+    }
+
+
+async def _analyze_and_respond_generic(session: ThinkingSession) -> dict:
+    """Generate the next question(s) using the full pipeline; fallback to legacy method."""
     try:
         if not session.messages:
             raise ValueError("No previous messages recorded")

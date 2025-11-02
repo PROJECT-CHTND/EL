@@ -1,5 +1,17 @@
 version: 1
 goals:
+  - kind: postmortem
+    label_ja: ポストモーテム
+    label_en: Postmortem
+    match:
+      any_keywords:
+        - postmortem
+        - ポストモーテム
+        - 障害
+        - インシデント
+        - incident
+        - outage
+    steps: []
   - kind: daily_work
     label_ja: 本日の業務
     label_en: Today's work
@@ -185,4 +197,3 @@ goals:
     match:
       any_keywords: []
     steps: []
-

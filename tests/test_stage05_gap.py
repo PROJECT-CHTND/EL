@@ -7,13 +7,12 @@ from agent.slots import Slot, SlotRegistry
 
 def test_analyze_gaps_priority_order():
     registry = SlotRegistry()
-    registry.add(Slot(name="slot1", description="desc1", filled=False, importance=0.9))
-    registry.add(Slot(name="slot2", description="desc2", filled=True, importance=1.0))
+    registry.add(Slot(name="slot1", description="desc1", importance=0.9))
+    registry.add(Slot(name="slot2", description="desc2", importance=1.0, filled_ratio=1.0))
     registry.add(
         Slot(
             name="slot3",
             description="desc3",
-            filled=False,
             importance=0.5,
             last_filled_ts=time.time() - 60 * 60 * 24 * 10,  # 10 days ago
         )
