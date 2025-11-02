@@ -8,7 +8,8 @@ from agent.models.kg import KGPayload
 from agent.slots import Slot, SlotRegistry
 
 DEFAULT_IMPORTANCE = 0.5
-RECENCY_DECAY_SECS = 60 * 60 * 24 * 7  # 1 week half-life
+# τ: 時定数（約7日）
+TAU_SECS = 60 * 60 * 24 * 7
 
 
 def _staleness(last_ts: float | None) -> float:
@@ -26,6 +27,7 @@ def analyze_gaps(registry: SlotRegistry, kg: KGPayload) -> List[Tuple[Slot, floa
     """Return slots sorted by priority descending."""
 
     results: List[Tuple[Slot, float]] = []
+    now = time.time()
     for slot in registry.all_slots():
         importance = slot.importance or DEFAULT_IMPORTANCE
         filled_ratio = max(0.0, min(1.0, slot.filled_ratio))

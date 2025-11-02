@@ -1,0 +1,43 @@
+from __future__ import annotations
+
+import abc
+from dataclasses import dataclass
+from typing import Iterable, Optional
+
+
+@dataclass
+class SessionRecord:
+    id: int
+    user_id: str
+    topic: str
+    goal_kind: str
+    created_at: str
+
+
+class SessionRepository(abc.ABC):
+    """Abstract repository for session persistence.
+
+    This abstraction allows swapping SQLite → Redis/Postgres without changing callers.
+    """
+
+    @abc.abstractmethod
+    async def init(self) -> None:
+        """Initialize storage (create tables/indexes)."""
+
+    @abc.abstractmethod
+    async def create_session(self, *, user_id: str, topic: str, goal_kind: str, created_at_iso: str) -> int:
+        """Create a session and return its integer id."""
+
+    @abc.abstractmethod
+    async def get_latest_session_by_user(self, user_id: str) -> Optional[SessionRecord]:
+        """Return the most recent session for the user if exists."""
+
+    @abc.abstractmethod
+    async def add_message(self, *, session_id: int, ts_iso: str, role: str, text: str) -> None:
+        """Append a message to the session transcript."""
+
+    @abc.abstractmethod
+    async def iter_messages(self, *, session_id: int) -> Iterable[tuple[str, str, str]]:
+        """Yield (ts_iso, role, text) for the session in order."""
+
+

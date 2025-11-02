@@ -120,6 +120,41 @@ make ci
 
 `python3.11` が無い場合は `make PYTHON=python3.10 install` のようにバージョンを指定できます。
 
+### 中間データトレース（EL_TRACE）
+
+各ステージの中間データ（抽出されたKG、付与された信頼度、提案スロット、生成/検証済み質問など）をJSONLで記録できます。
+
+1) 有効化
+
+```bash
+export EL_TRACE=1
+# 任意: 出力先（既定: logs/wal/trace_YYYYMMDD.log）
+export EL_TRACE_DIR="/absolute/path/to/logs/wal"
+```
+
+2) 実行（BotまたはAPI）後、以下のように確認できます:
+
+```bash
+# 直近のトレースを閲覧
+tail -n 50 logs/wal/trace_*.log
+
+# 例: 抽出されたKG（エンティティ/リレーション数）
+jq 'select(.stage=="stage02_extract" and .kind=="parsed_kg") | {ts, counts: {entities: (.payload.entities|length), relations: (.payload.relations|length)}}' logs/wal/trace_*.log
+
+# 例: 提案スロット
+jq 'select(.stage=="stage04_slots" and .kind=="proposed_slots") | {ts, slots: .payload}' logs/wal/trace_*.log
+
+# 例: 生成/検証済み質問
+jq 'select((.stage=="stage06_qgen" and .kind=="generated_questions") or (.stage=="stage07_qcheck" and .kind=="validated_questions")) | {ts, stage, kind, questions: [.payload[].text]}' logs/wal/trace_*.log
+```
+
+3) プロンプト変更の効果比較
+
+- `EL_PROMPT_VARIANTS_DIR` でプロンプト差し替えを行い、各バリアントで同一入力を実行
+- ログ（trace_*.log）をA/Bで保存し、上記の`jq`で件数・内容差分を比較
+
+メモ: PIIは可能な範囲でマスキングされます（`el-agent/utils/pii.py`）。
+
 ### 運用 Runbook
 
 詳細な運用手順・アラート設定は `docs/OPERATIONS.md` を参照してください。

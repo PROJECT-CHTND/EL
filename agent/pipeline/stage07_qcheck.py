@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Dict, List
 
 from agent.llm.openai_client import OpenAIClient
 from agent.models.question import Question
 from agent.prompts.qcheck import SYSTEM_PROMPT, ACCEPT_THRESHOLD
+from agent.utils.json_utils import parse_json_strict
+from agent.monitoring.trace import trace_event
 
 openai_client = OpenAIClient()
 
@@ -23,36 +26,45 @@ async def return_validated_questions(questions: List[Question]) -> List[Question
     ]
 
     response = await openai_client.call(messages=messages, temperature=0.0, logprobs=False)
+    trace_event("stage07_qcheck", "llm_request", {"input_questions": q_in})
 
-    raw_content = response.content.strip()
-
-    # Remove leading Markdown code fences if present without accidentally stripping
-    # valid JSON characters. Handle both language-specified (```json) and generic
-    # (```) fences explicitly.
-    if raw_content.startswith("```json"):
-        # Remove the first 7 characters: "```json"
-        raw_content = raw_content[7:]
-        # Strip trailing backticks and surrounding whitespace
-        raw_content = raw_content.rstrip("`").strip()
-    elif raw_content.startswith("```"):
-        # Remove the first 3 characters: "```"
-        raw_content = raw_content[3:]
-        raw_content = raw_content.rstrip("`").strip()
-
+    raw_content = response.content or ""
     try:
-        arr = json.loads(raw_content)
+        arr = parse_json_strict(raw_content)
         if not isinstance(arr, list):
             arr = []
-    except json.JSONDecodeError:
+    except Exception:
         arr = []
+
+    # thresholds (configurable)
+    spec_th = float(os.getenv("QCHECK_SPEC_THRESHOLD", str(ACCEPT_THRESHOLD)))
+    tacit_th = float(os.getenv("QCHECK_TACIT_THRESHOLD", "0.5"))
+    max_len = int(os.getenv("QCHECK_MAX_LEN", "240"))
 
     accepted: List[Question] = []
     for item in arr:
         try:
             q = Question.model_validate(item)
-            if (q.specificity or 0.0) >= ACCEPT_THRESHOLD and (q.tacit_power or 0.0) >= ACCEPT_THRESHOLD:
-                accepted.append(q)
+            if (q.specificity or 0.0) >= spec_th and (q.tacit_power or 0.0) >= tacit_th:
+                # UX: too long questions are discarded
+                if isinstance(q.text, str) and len(q.text) <= max_len:
+                    accepted.append(q)
         except Exception:  # noqa: BLE001
             continue
 
-    return accepted 
+    # Deduplicate by normalized text
+    seen = set()
+    deduped: List[Question] = []
+    for q in accepted:
+        key = (q.text or "").strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(q)
+
+    trace_event(
+        "stage07_qcheck",
+        "validated_questions",
+        [q.model_dump(exclude_none=True) for q in deduped],
+        meta={"spec_th": spec_th, "tacit_th": tacit_th, "max_len": max_len},
+    )
+    return deduped

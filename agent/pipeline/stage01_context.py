@@ -9,6 +9,7 @@ import redis.asyncio as aioredis  # type: ignore
 from agent.llm.openai_client import OpenAIClient
 from agent.models.context import ContextPayload
 from agent.prompts.context import SYSTEM_PROMPT
+from agent.utils.json_utils import parse_json_strict
 
 openai_client = OpenAIClient()
 
@@ -27,13 +28,10 @@ async def generate_context(text: str) -> ContextPayload:
 
     response = await openai_client.call(messages=messages, temperature=0.3, logprobs=False)
 
-    raw_content = response.content.strip()
-    if raw_content.startswith("```"):
-        raw_content = raw_content.lstrip("`json\n").rstrip("`")
-
+    raw_content = response.content or ""
     try:
-        data: Dict[str, Any] = json.loads(raw_content)
-    except json.JSONDecodeError:
+        data: Dict[str, Any] = parse_json_strict(raw_content)
+    except Exception:
         data = {"rag_keys": "", "mid_summary": "", "global_summary": ""}
 
     payload = ContextPayload.model_validate(data)

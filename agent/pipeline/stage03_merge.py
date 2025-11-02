@@ -4,6 +4,7 @@ from typing import List, Optional
 
 from agent.kg.client import Neo4jClient
 from agent.models.kg import KGPayload
+from agent.monitoring.trace import trace_event
 
 DEFAULT_STAGE_WEIGHT = 1.0
 
@@ -39,6 +40,16 @@ def merge_and_persist(
     for rel in payload.relations:
         rel.confidence = confidence
 
+    trace_event("stage03_merge", "confidence_applied", {
+        "confidence": confidence,
+        "entities": len(payload.entities),
+        "relations": len(payload.relations),
+    })
+
     client = neo4j_client or Neo4jClient()
     client.ingest(payload)
+    trace_event("stage03_merge", "ingested", {
+        "entities": len(payload.entities),
+        "relations": len(payload.relations),
+    })
     return payload 
