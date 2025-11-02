@@ -7,6 +7,8 @@ from agent.llm.openai_client import OpenAIClient
 from agent.models.kg import KGPayload
 from agent.prompts.slots import SYSTEM_PROMPT
 from agent.slots import Slot, SlotRegistry
+from agent.monitoring.trace import trace_event
+from agent.utils.json_utils import parse_json_strict
 
 openai_client = OpenAIClient()
 
@@ -34,16 +36,14 @@ async def propose_slots(
     ]
 
     response = await openai_client.call(messages=messages, temperature=0.4, logprobs=False)
+    trace_event("stage04_slots", "llm_request", {"kg": kg, "topic": topic_meta})
 
-    raw_content = response.content.strip()
-    if raw_content.startswith("```"):
-        raw_content = raw_content.lstrip("`json\n").rstrip("`")
-
+    raw_content = response.content or ""
     try:
-        suggestions = json.loads(raw_content)
+        suggestions = parse_json_strict(raw_content)
         if not isinstance(suggestions, list):
             suggestions = []
-    except json.JSONDecodeError:
+    except Exception:
         suggestions = []
 
     slots: List[Slot] = []
@@ -57,4 +57,5 @@ async def propose_slots(
         for slot in slots:
             registry.add(slot)
 
-    return slots 
+    trace_event("stage04_slots", "proposed_slots", [s.model_dump(exclude_none=True) for s in slots])
+    return slots

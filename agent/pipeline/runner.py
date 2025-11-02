@@ -69,3 +69,51 @@ class AsyncPipelineRunner:
                 if not task.done():
                     task.cancel()
             raise
+
+
+# --- High-level one-turn orchestrator (sequential) ---
+from typing import Optional  # noqa: E402
+from agent.pipeline.stage02_extract import extract_knowledge  # noqa: E402
+from agent.pipeline.stage03_merge import merge_and_persist  # noqa: E402
+from agent.pipeline.stage04_slots import propose_slots  # noqa: E402
+from agent.pipeline.stage06_qgen import generate_questions  # noqa: E402
+from agent.pipeline.stage07_qcheck import return_validated_questions  # noqa: E402
+from agent.models.question import Question  # noqa: E402
+
+
+async def run_turn(
+    answer_text: str,
+    *,
+    topic_meta: Optional[str] = None,
+    max_slots: int = 3,
+    max_questions: int = 10,
+) -> list[Question]:
+    """Execute Stage02→03→04→06→07 sequentially and return validated questions.
+
+    Non-fatal behavior:
+      - Stage03(merge) failures do not abort the turn.
+    """
+
+    # Stage02 – extract KG fragment
+    kg = await extract_knowledge(answer_text, focus=topic_meta)
+
+    # Stage03 – merge/persist KG (non-blocking)
+    try:
+        merge_and_persist(kg)
+    except Exception as _:
+        # swallow merge errors; proceed with the best-effort KG
+        pass
+
+    # Stage04 – propose slots
+    slots = await propose_slots(kg, topic_meta=topic_meta, max_slots=max_slots)
+    if not slots:
+        return []
+
+    # Stage06 – generate questions
+    questions = await generate_questions(slots, max_questions=max_questions)
+    if not questions:
+        return []
+
+    # Stage07 – validate questions
+    validated = await return_validated_questions(questions)
+    return validated

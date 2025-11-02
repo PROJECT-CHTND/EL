@@ -17,7 +17,9 @@ from agent.pipeline.stage03_merge import merge_and_persist
 from agent.pipeline.stage04_slots import propose_slots
 from agent.pipeline.stage06_qgen import generate_questions
 from agent.pipeline.stage07_qcheck import return_validated_questions
+from agent.pipeline.runner import run_turn
 from agent.models.question import Question
+from agent.stores.sqlite_store import SqliteSessionRepository
 
 import asyncio
 import io
@@ -120,9 +122,14 @@ class ELBot(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix='!', intents=intents)
         self.sessions = {}
+        self.session_repo = SqliteSessionRepository()
         
     async def on_ready(self):
         print(f'🧠 {self.user} - EL has started!')
+        try:
+            await self.session_repo.init()
+        except Exception:
+            pass
         await self.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.listening,
@@ -168,6 +175,7 @@ class ThinkingSession:
         self.insights: List[Any] = []
         self.phase = "introduction"
         self.last_question: Optional[str] = None
+        self.db_session_id: Optional[int] = None
         # el-agent 連携用の状態
         self.hypothesis: Optional["Hypothesis"] = None  # type: ignore[name-defined]
         self.belief: float = 0.5
@@ -224,6 +232,18 @@ async def start_exploration(ctx, *, topic: Optional[str] = None):
     # セッション作成
     session = ThinkingSession(user_id, topic, thread.id, session_language)
     bot.sessions[user_id] = session
+
+    # セッション永続化（SQLite）
+    try:
+        sid = await bot.session_repo.create_session(
+            user_id=user_id,
+            topic=topic,
+            goal_kind=session.goal_kind,
+            created_at_iso=session.created_at.isoformat(),
+        )
+        session.db_session_id = sid
+    except Exception:
+        session.db_session_id = None
 
     # el-agent 初期化（仮説初期値）
     if agent_runtime.available:
@@ -403,6 +423,14 @@ async def on_message(message: discord.Message):
         
     # 今回のやり取りを履歴に追加
     session.add_exchange(session.last_question, message.content)
+    # 永続化（Q→A）
+    if session.db_session_id is not None:
+        try:
+            ts_now = datetime.now().isoformat()
+            await bot.session_repo.add_message(session_id=session.db_session_id, ts_iso=ts_now, role="assistant", text=session.last_question or "")
+            await bot.session_repo.add_message(session_id=session.db_session_id, ts_iso=ts_now, role="user", text=message.content)
+        except Exception:
+            pass
     
     # el-agent が必須かつ未利用可能なら即エラーを返す
     if EL_AGENT_REQUIRED and not agent_runtime.available:
@@ -707,50 +735,25 @@ def plan_next_question(session: ThinkingSession, last_user_msg: str) -> Optional
     return None
 
 async def analyze_and_respond(session: ThinkingSession) -> dict:
-    """Generate the next question(s) using the full pipeline; fallback to legacy method."""
+    """Generate the next question(s) via runner.run_turn; fallback to legacy method."""
     try:
-        # 1) Get the latest user answer text
         if not session.messages:
             raise ValueError("No previous messages recorded")
         answer_text: str = session.messages[-1]["answer"]
 
-        # 2) Stage02 – extract KG fragment
-        kg = await extract_knowledge(answer_text, focus=session.topic)
-
-        # 3) Stage03 – merge/persist KG (non-blocking)
-        try:
-            merge_and_persist(kg)
-        except Exception as merge_err:  # noqa: BLE001
-            print(f"[Pipeline] merge_and_persist failed: {merge_err}")
-
-        # 4) Stage04 – propose slots
-        slots = await propose_slots(kg, topic_meta=session.topic)
-        if not slots:
-            raise ValueError("No slots proposed")
-
-        # 5) Stage06 – generate questions
-        questions = await generate_questions(slots)
-        if not questions:
-            raise ValueError("No questions generated")
-
-        # 6) Stage07 – validate questions
-        validated = await return_validated_questions(questions)
+        validated = await run_turn(answer_text, topic_meta=session.topic)
         if not validated:
             raise ValueError("No validated questions")
 
-        # Convert to legacy response format expected by downstream code
         next_questions = [
             {
-                "level": 2,  # default depth indicator
+                "level": 2,
                 "type": "clarifying",
                 "question": q.text,
             }
             for q in validated
         ]
-        return {
-            "next_questions": next_questions,
-            "session_progress": {},
-        }
+        return {"next_questions": next_questions, "session_progress": {}}
     except Exception as exc:  # noqa: BLE001
         print(f"[Pipeline] Falling back to legacy: {exc}")
         return await analyze_and_respond_legacy(session)

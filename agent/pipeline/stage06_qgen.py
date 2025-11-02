@@ -10,6 +10,8 @@ from agent.llm.openai_client import OpenAIClient
 from agent.prompts.qgen import SYSTEM_PROMPT
 from agent.slots import Slot
 from agent.models.question import Question
+from agent.monitoring.trace import trace_event
+from agent.utils.json_utils import parse_json_strict
 
 openai_client = OpenAIClient()
 
@@ -69,16 +71,14 @@ async def generate_questions(
     ]
 
     response = await openai_client.call(messages=messages, temperature=0.6, logprobs=False)
+    trace_event("stage06_qgen", "llm_request", {"examples": examples})
 
-    raw_content = response.content.strip()
-    if raw_content.startswith("```"):
-        raw_content = raw_content.lstrip("`json\n").rstrip("`")
-
+    raw_content = response.content or ""
     try:
-        arr = json.loads(raw_content)
+        arr = parse_json_strict(raw_content)
         if not isinstance(arr, list):
             arr = []
-    except json.JSONDecodeError:
+    except Exception:
         arr = []
 
     questions: List[Question] = []
@@ -87,5 +87,5 @@ async def generate_questions(
             questions.append(Question.model_validate(item))
         except Exception:  # noqa: BLE001
             continue
-
-    return questions 
+    trace_event("stage06_qgen", "generated_questions", [q.model_dump(exclude_none=True) for q in questions])
+    return questions
