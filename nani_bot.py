@@ -11,6 +11,11 @@ from pathlib import Path
 import sys
 import yaml  # type: ignore
 
+try:
+    import redis.asyncio as aioredis  # type: ignore
+except Exception:  # pragma: no cover - redis is optional during tests
+    aioredis = None  # type: ignore
+
 # --- Pipeline modules ---
 from agent.pipeline.stage02_extract import extract_knowledge
 from agent.pipeline.stage03_merge import merge_and_persist
@@ -23,6 +28,12 @@ from agent.models.question import Question
 from agent.models.kg import KGPayload
 from agent.slots import Slot, SlotRegistry
 from agent.slots.postmortem import build_postmortem_registry, fallback_question
+from agent.stores.sqlite_store import SqliteSessionRepository
+from agent.stores.redis_slot_registry import (
+    InMemorySlotRegistryRepository,
+    RedisSlotRegistryRepository,
+    SlotRegistryPersistenceManager,
+)
 
 import asyncio
 import io
@@ -120,12 +131,25 @@ def detect_language(text: str) -> str:
     return "Japanese" if japanese_chars else "English"
 
 class ELBot(commands.Bot):
-    def __init__(self):
+    def __init__(self, *, slot_registry_store: SlotRegistryPersistenceManager | None = None):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(command_prefix='!', intents=intents)
         self.sessions = {}
         self.session_repo = SqliteSessionRepository()
+        self.slot_registry_store = slot_registry_store or self._build_slot_registry_store()
+
+    def _build_slot_registry_store(self) -> SlotRegistryPersistenceManager:
+        primary = None
+        redis_url = os.getenv("REDIS_URL")
+        if redis_url and aioredis is not None:
+            try:
+                client = aioredis.from_url(redis_url)
+                primary = RedisSlotRegistryRepository(client)
+            except Exception:
+                primary = None
+        fallback = InMemorySlotRegistryRepository()
+        return SlotRegistryPersistenceManager(primary=primary, fallback=fallback)
         
     async def on_ready(self):
         print(f'🧠 {self.user} - EL has started!')
@@ -191,6 +215,8 @@ class ThinkingSession:
         self.goal_state: Dict[str, Any] = {"asked": set(), "filled": {}}
         self.slot_registry: SlotRegistry = SlotRegistry()
         self.slot_answers: Dict[str, List[str]] = {}
+        self.slot_registry_storage_id: str = str(thread_id)
+        self.db_session_id: Optional[int] = None
         self.configure_slots(self.goal_kind)
 
     def add_exchange(self, question: str, answer: str):
@@ -246,6 +272,15 @@ async def start_exploration(ctx, *, topic: Optional[str] = None):
     
     # セッション作成
     session = ThinkingSession(user_id, topic, thread.id, session_language)
+    if bot.slot_registry_store:
+        restored = await bot.slot_registry_store.load(session.slot_registry_storage_id)
+        if restored:
+            session.slot_registry = restored
+            filled = session.goal_state.setdefault("filled", {})
+            for slot in restored.all_slots():
+                if slot.value is not None:
+                    filled[slot.name] = slot.value
+                    session.slot_answers.setdefault(slot.name, []).append(slot.value)
     bot.sessions[user_id] = session
 
     # セッション永続化（SQLite）
@@ -445,7 +480,13 @@ async def on_message(message: discord.Message):
 
     if session.pending_slot:
         slot_name = session.pending_slot
-        session.slot_registry.update(slot_name, value=message.content, source_kind="user")
+        updated_slot = session.slot_registry.update(
+            slot_name, value=message.content, source_kind="user"
+        )
+        if updated_slot is not None and bot.slot_registry_store:
+            await bot.slot_registry_store.save(
+                session.slot_registry_storage_id, session.slot_registry
+            )
         session.goal_state.setdefault("filled", {})[slot_name] = message.content
         session.slot_answers.setdefault(slot_name, []).append(message.content)
         session.pending_slot = None
