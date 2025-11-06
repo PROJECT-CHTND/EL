@@ -65,10 +65,17 @@ async def test_analyze_and_respond(monkeypatch):
     async def _mock_validate(questions):  # noqa: ANN001
         return questions  # return as-is
 
+    async def _mock_run_turn(answer_text: str, **kwargs):  # noqa: ANN001
+        await _mock_extract(answer_text, **kwargs)
+        slots = await _mock_propose(None)
+        questions = await _mock_generate(slots)
+        return await _mock_validate(questions)
+
     monkeypatch.setattr(nb, "extract_knowledge", _mock_extract, raising=True)
     monkeypatch.setattr(nb, "propose_slots", _mock_propose, raising=True)
     monkeypatch.setattr(nb, "generate_questions", _mock_generate, raising=True)
     monkeypatch.setattr(nb, "return_validated_questions", _mock_validate, raising=True)
+    monkeypatch.setattr(nb, "run_turn", _mock_run_turn, raising=True)
 
     # construct session
     session = ThinkingSession("user1", "テストトピック", 123, "Japanese")
