@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from pydantic import BaseModel, Field
 
@@ -32,6 +32,17 @@ class Slot(BaseModel):
         """Whether the slot is considered filled based on filled_ratio."""
 
         return self.filled_ratio >= FILL_THRESHOLD
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a JSON-serializable representation of the slot."""
+
+        return self.model_dump()
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "Slot":
+        """Reconstruct a Slot from serialized data."""
+
+        return cls.model_validate(dict(data))
 
 
 class SlotRegistry:
@@ -104,3 +115,35 @@ class SlotRegistry:
         if not self._slots:
             return 0.0
         return sum(1 for slot in self._slots.values() if slot.filled) / len(self._slots)
+
+    def model_dump(self) -> Dict[str, Dict[str, Any]]:
+        """Serialize the registry into primitive types."""
+
+        return {name: slot.model_dump() for name, slot in self._slots.items()}
+
+    @classmethod
+    def model_validate(cls, data: Mapping[str, Any] | None) -> "SlotRegistry":
+        """Create a registry from serialized data."""
+
+        registry = cls()
+        if not data:
+            return registry
+
+        for name, payload in data.items():
+            if not isinstance(payload, Mapping):
+                continue
+            slot_data = dict(payload)
+            slot_name = slot_data.get("name") or name
+            if slot_data.get("name") != slot_name:
+                slot_data["name"] = slot_name
+            try:
+                slot = Slot.from_dict(slot_data)
+            except Exception:
+                continue
+            registry.add(slot)
+        return registry
+
+    def to_dict(self) -> Dict[str, Dict[str, Any]]:
+        """Alias for model_dump for external callers."""
+
+        return self.model_dump()
