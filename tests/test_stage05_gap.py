@@ -1,8 +1,11 @@
 import time
 
+from prometheus_client import REGISTRY
+
 from agent.models.kg import KGPayload
 from agent.pipeline.stage05_gap import analyze_gaps
 from agent.slots import Slot, SlotRegistry
+from agent.monitoring.metrics import SLOT_GAP_LATENCY_SECONDS
 
 
 def test_analyze_gaps_priority_order():
@@ -19,6 +22,11 @@ def test_analyze_gaps_priority_order():
     )
 
     kg = KGPayload(entities=[], relations=[])
+    try:
+        SLOT_GAP_LATENCY_SECONDS.remove("stage05_gap")
+    except KeyError:
+        pass
+
     ranked = analyze_gaps(registry, kg)
 
     # The unfilled high importance slot should come first
@@ -26,4 +34,8 @@ def test_analyze_gaps_priority_order():
 
     # Filled slot should have zero priority
     filled_priority = next(p for s, p in ranked if s.name == "slot2")
-    assert filled_priority == 0.0 
+    assert filled_priority == 0.0
+
+    latency_value = REGISTRY.get_sample_value("slot_gap_latency_seconds", {"pipeline_stage": "stage05_gap"})
+    assert latency_value is not None
+    assert latency_value >= 0.0

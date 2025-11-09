@@ -22,6 +22,7 @@ from agent.pipeline.runner import run_turn
 from agent.models.question import Question
 from agent.models.kg import KGPayload
 from agent.slots import Slot, SlotRegistry
+from agent.stores.sqlite_store import SqliteSessionRepository
 from agent.slots.postmortem import build_postmortem_registry, fallback_question
 
 import asyncio

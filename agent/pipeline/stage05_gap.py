@@ -6,10 +6,12 @@ from typing import List, Tuple
 
 from agent.models.kg import KGPayload
 from agent.slots import Slot, SlotRegistry
+from agent.monitoring.metrics import SLOT_GAP_LATENCY_SECONDS
 
 DEFAULT_IMPORTANCE = 0.5
 # τ: 時定数（約7日）
 TAU_SECS = 60 * 60 * 24 * 7
+RECENCY_DECAY_SECS = TAU_SECS
 
 
 def _staleness(last_ts: float | None) -> float:
@@ -26,6 +28,7 @@ def _staleness(last_ts: float | None) -> float:
 def analyze_gaps(registry: SlotRegistry, kg: KGPayload) -> List[Tuple[Slot, float]]:
     """Return slots sorted by priority descending."""
 
+    start = time.perf_counter()
     results: List[Tuple[Slot, float]] = []
     now = time.time()
     for slot in registry.all_slots():
@@ -36,4 +39,8 @@ def analyze_gaps(registry: SlotRegistry, kg: KGPayload) -> List[Tuple[Slot, floa
         results.append((slot, priority))
 
     results.sort(key=lambda pair: pair[1], reverse=True)
+
+    duration = time.perf_counter() - start
+    SLOT_GAP_LATENCY_SECONDS.labels(pipeline_stage="stage05_gap").set(duration)
+
     return results

@@ -8,6 +8,7 @@ from agent.llm.openai_client import OpenAIClient
 from agent.models.question import Question
 from agent.prompts.qcheck import SYSTEM_PROMPT, ACCEPT_THRESHOLD
 from agent.utils.json_utils import parse_json_strict
+from agent.monitoring.metrics import SLOT_DUPLICATE_RATE, SLOT_DUPLICATES_TOTAL
 from agent.monitoring.trace import trace_event
 
 openai_client = OpenAIClient()
@@ -55,11 +56,20 @@ async def return_validated_questions(questions: List[Question]) -> List[Question
     # Deduplicate by normalized text
     seen = set()
     deduped: List[Question] = []
+    duplicates = 0
     for q in accepted:
         key = (q.text or "").strip().lower()
         if key and key not in seen:
             seen.add(key)
             deduped.append(q)
+        else:
+            duplicates += 1
+
+    total_considered = len(accepted)
+    duplicate_rate = (duplicates / total_considered) if total_considered else 0.0
+    SLOT_DUPLICATE_RATE.labels(pipeline_stage="stage07_qcheck").set(duplicate_rate)
+    if duplicates:
+        SLOT_DUPLICATES_TOTAL.labels(pipeline_stage="stage07_qcheck").inc(duplicates)
 
     trace_event(
         "stage07_qcheck",

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 from typing import Dict, List, Optional
 
 from agent.llm.openai_client import OpenAIClient
 from agent.models.kg import KGPayload
 from agent.prompts.slots import SYSTEM_PROMPT
 from agent.slots import Slot, SlotRegistry
+from agent.monitoring.metrics import SLOT_COVERAGE
 from agent.monitoring.trace import trace_event
 from agent.utils.json_utils import parse_json_strict
 
@@ -56,6 +56,9 @@ async def propose_slots(
     if registry is not None:
         for slot in slots:
             registry.add(slot)
+
+        # Update slot coverage metric once new slots are registered
+        SLOT_COVERAGE.labels(pipeline_stage="stage04_slots").set(registry.coverage())
 
     trace_event("stage04_slots", "proposed_slots", [s.model_dump(exclude_none=True) for s in slots])
     return slots
