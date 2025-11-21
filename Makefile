@@ -9,7 +9,7 @@ install:
 		pip install -r requirements.txt -r dev-requirements.txt
 
 test:
-	. $(VENV)/bin/activate && pytest -q
+	. $(VENV)/bin/activate && python -m pytest -q
 
 typecheck:
 	. $(VENV)/bin/activate && mypy agent

@@ -103,8 +103,17 @@ Swagger: `http://localhost:8000/docs`
 pytest を利用して各ステージのユニットテストを実行できます。
 
 ```bash
-pytest -q
+python -m pytest -q
 ```
+
+macOS を含むローカル環境では、以下のコマンドで Discord Bot を起動しつつ Prometheus メトリクスを公開できます。
+
+```bash
+export METRICS_PORT=8000
+python nani_bot.py
+```
+
+Prometheus からは `ops/prometheus.yml` に定義された `host.docker.internal:8000` 経由でメトリクスがスクレイプされます。
 
 ### ローカルで CI を再現する
 
