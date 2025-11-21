@@ -180,6 +180,7 @@ class ThinkingSession:
         self.phase = "introduction"
         self.last_question: Optional[str] = None
         self.pending_slot: Optional[str] = None
+        self.db_session_id: Optional[int] = None
         # el-agent 連携用の状態
         self.hypothesis: Optional["Hypothesis"] = None  # type: ignore[name-defined]
         self.belief: float = 0.5
@@ -314,6 +315,17 @@ async def start_exploration(ctx, *, topic: Optional[str] = None):
     
     await thread.send(embed=q_embed)
     await thread.add_user(ctx.author)
+    # 初回質問を永続化（assistantロール）
+    if session.db_session_id is not None:
+        try:
+            await bot.session_repo.add_message(
+                session_id=session.db_session_id,
+                ts_iso=datetime.now().isoformat(),
+                role="assistant",
+                text=first_question,
+            )
+        except Exception:
+            pass
 
 @bot.command(name='reflect')
 async def reflect_session(ctx):
@@ -437,6 +449,47 @@ async def on_message(message: discord.Message):
     
     user_id = str(message.author.id)
     session = bot.sessions.get(user_id)
+    # 再起動復帰: メモリに無ければDBから復元
+    if not session:
+        try:
+            rec = await bot.session_repo.get_session_by_thread(user_id=user_id, thread_id=message.channel.id)
+            if rec:
+                restored = ThinkingSession(user_id=user_id, topic=rec.topic, thread_id=message.channel.id, language=rec.language or detect_language(rec.topic))
+                restored.db_session_id = rec.id
+                # スロットをDBから再構築
+                try:
+                    rows = await bot.session_repo.get_slots(session_id=rec.id)
+                    restored.configure_slots(rec.goal_kind or restored.goal_kind)
+                    for row in rows:
+                        try:
+                            restored.slot_registry.add(Slot(
+                                name=row.get("name"),
+                                description=row.get("description") or "",
+                                type=row.get("type"),
+                                importance=float(row.get("importance") or 1.0),
+                                filled_ratio=float(row.get("filled_ratio") or 0.0),
+                                last_filled_ts=row.get("last_filled_ts"),
+                                value=row.get("value"),
+                                source_kind=row.get("source_kind"),
+                            ))
+                        except Exception:
+                            pass
+                    # 最終assistant質問を復元
+                    try:
+                        last_q = None
+                        async for ts_iso, role, text in bot.session_repo.iter_messages(session_id=rec.id):
+                            if role == "assistant" and text:
+                                last_q = text
+                        if last_q:
+                            restored.last_question = last_q
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                bot.sessions[user_id] = restored
+                session = restored
+        except Exception:
+            session = None
     
     if not session or message.channel.id != session.thread_id or not session.last_question:
         return
