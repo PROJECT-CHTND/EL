@@ -90,6 +90,14 @@ EL_EVAL_WEIGHTS="/absolute/path/to/config/weights/weights.json"  # 任意: 評�
 EL_PROMPT_VARIANTS_DIR="/absolute/path/to/prompts"               # 任意: プロンプト差し替え
 ```
 
+Strategist の VoI/停止しきい値は、以下の環境変数で調整できます（M2 準備）。
+
+- `EL_VOI_TAU_STOP` : `ask/search/none` を切り替える停止しきい値（デフォルト `0.08`）
+
+```bash
+export EL_VOI_TAU_STOP=0.05  # しきい値を下げて、より積極的に質問を続ける
+```
+
 ### サーバ起動（例）
 
 ```bash
