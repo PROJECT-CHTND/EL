@@ -4,6 +4,7 @@ import math
 from typing import List
 
 from ..schemas import Hypothesis, StrategistAction
+from ..config import get_settings
 
 
 def entropy(p: float) -> float:
@@ -29,8 +30,22 @@ def slot_coverage_gain(h: Hypothesis) -> float:
 
 
 class Strategist:
-    def __init__(self, tau_stop: float = 0.08) -> None:
-        self.tau_stop = float(tau_stop)
+    def __init__(self, tau_stop: float | None = None) -> None:
+        """VoIベースの簡易ストラテジスト。
+
+        tau_stop が None の場合は設定/環境変数から既定値を取得する。
+        """
+        settings = get_settings()
+        # env: EL_VOI_TAU_STOP（無ければ 0.08）
+        default_tau = getattr(settings, "voi_tau_stop", None)
+        if default_tau is None:
+            try:
+                import os
+
+                default_tau = float(os.getenv("EL_VOI_TAU_STOP", "0.08"))
+            except Exception:
+                default_tau = 0.08
+        self.tau_stop = float(tau_stop if tau_stop is not None else default_tau)
 
     def pick_action(self, h: Hypothesis) -> StrategistAction:
         u = entropy(h.belief)
