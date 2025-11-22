@@ -8,40 +8,72 @@
   "panels": [
     {
       "type": "timeseries",
-      "title": "Request latency (p50/p90/p99) by endpoint",
+      "title": "Turn latency (p50/p90/p99)",
       "datasource": {"type": "prometheus", "uid": "grafana-prom"},
       "targets": [
-        {"expr": "histogram_quantile(0.5, sum(rate(request_latency_seconds_bucket[5m])) by (le, endpoint))", "refId": "A"},
-        {"expr": "histogram_quantile(0.9, sum(rate(request_latency_seconds_bucket[5m])) by (le, endpoint))", "refId": "B"},
-        {"expr": "histogram_quantile(0.99, sum(rate(request_latency_seconds_bucket[5m])) by (le, endpoint))", "refId": "C"}
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(turn_latency_seconds_bucket[5m])) by (le))",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.9, sum(rate(turn_latency_seconds_bucket[5m])) by (le))",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(turn_latency_seconds_bucket[5m])) by (le))",
+          "refId": "C"
+        }
       ],
-      "options": {"legend": {"displayMode": "table", "placement": "bottom"}}
-    },
-    {
-      "type": "stat",
-      "title": "Open hypotheses",
-      "datasource": {"type": "prometheus", "uid": "grafana-prom"},
-      "targets": [{"expr": "hypotheses_open", "refId": "A"}],
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": ""}}
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom"}
+      }
     },
     {
       "type": "timeseries",
-      "title": "LLM calls by kind",
+      "title": "Slot coverage by stage",
       "datasource": {"type": "prometheus", "uid": "grafana-prom"},
-      "targets": [{"expr": "sum(rate(llm_calls_total[5m])) by (kind)", "refId": "A"}]
+      "targets": [
+        {
+          "expr": "slot_coverage",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {"displayMode": "list", "placement": "bottom"}
+      }
     },
     {
       "type": "timeseries",
-      "title": "Retrieval calls by stage",
+      "title": "QCheck duplicate rate",
       "datasource": {"type": "prometheus", "uid": "grafana-prom"},
-      "targets": [{"expr": "sum(rate(retrieval_calls_total[5m])) by (stage)", "refId": "A"}]
+      "targets": [
+        {
+          "expr": "slot_duplicate_rate{pipeline_stage=\"stage07_qcheck\"}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "QCheck duplicates total",
+      "datasource": {"type": "prometheus", "uid": "grafana-prom"},
+      "targets": [
+        {
+          "expr": "increase(slot_duplicates_total{pipeline_stage=\"stage07_qcheck\"}[5m])",
+          "refId": "A"
+        }
+      ]
     },
     {
       "type": "logs",
       "title": "WAL logs (Loki)",
       "datasource": {"type": "loki", "uid": "grafana-loki"},
       "options": {"showLabels": true},
-      "targets": [{"expr": "{job=\"wal\"}"}]
+      "targets": [
+        {
+          "expr": "{job=\"wal\"}"
+        }
+      ]
     }
   ],
   "refresh": "10s",
