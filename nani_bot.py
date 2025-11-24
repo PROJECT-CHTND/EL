@@ -25,6 +25,9 @@ from agent.slots import Slot, SlotRegistry
 from agent.stores.sqlite_store import SqliteSessionRepository
 from agent.slots.postmortem import build_postmortem_registry, fallback_question as postmortem_fallback
 from agent.slots.sop import build_sop_registry, fallback_question as sop_fallback
+from agent.slots.recipe import build_recipe_registry, fallback_question as recipe_fallback
+from agent.slots.daily_work import build_daily_work_registry, fallback_question as daily_work_fallback
+from agent.monitoring.metrics import start_metrics_server
 
 import asyncio
 import io
@@ -209,6 +212,10 @@ class ThinkingSession:
             self.slot_registry = build_postmortem_registry()
         elif goal_kind == "sop":
             self.slot_registry = build_sop_registry()
+        elif goal_kind == "recipe":
+            self.slot_registry = build_recipe_registry()
+        elif goal_kind == "daily_work":
+            self.slot_registry = build_daily_work_registry()
         else:
             self.slot_registry = SlotRegistry()
         self.pending_slot = None
