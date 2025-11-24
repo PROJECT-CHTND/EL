@@ -23,7 +23,8 @@ from agent.models.question import Question
 from agent.models.kg import KGPayload
 from agent.slots import Slot, SlotRegistry
 from agent.stores.sqlite_store import SqliteSessionRepository
-from agent.slots.postmortem import build_postmortem_registry, fallback_question
+from agent.slots.postmortem import build_postmortem_registry, fallback_question as postmortem_fallback
+from agent.slots.sop import build_sop_registry, fallback_question as sop_fallback
 
 import asyncio
 import io
@@ -206,6 +207,8 @@ class ThinkingSession:
         self.goal_kind = goal_kind
         if goal_kind == "postmortem":
             self.slot_registry = build_postmortem_registry()
+        elif goal_kind == "sop":
+            self.slot_registry = build_sop_registry()
         else:
             self.slot_registry = SlotRegistry()
         self.pending_slot = None
@@ -715,7 +718,7 @@ async def generate_opening_question(topic: str, lang: str, goal_kind: str = "gen
     """
 
     if goal_kind == "postmortem":
-        return fallback_question("summary", lang)
+        return postmortem_fallback("summary", lang)
     try:
         prompt_path = Path(__file__).parent / "agent" / "prompts" / "opening.yaml"
         with prompt_path.open("r", encoding="utf-8") as f:
@@ -745,7 +748,7 @@ def get_opening_question(topic: str, lang: str, goal_kind: str = "generic") -> s
     """トピックに応じた知識を活用した最初の質問を生成"""
 
     if goal_kind == "postmortem":
-        return fallback_question("summary", lang)
+        return postmortem_fallback("summary", lang)
     topic_lower = topic.lower()
 
     if lang == "Japanese":
@@ -909,7 +912,7 @@ async def _run_postmortem_turn(session: ThinkingSession) -> dict:
 
     chosen: Question | None = None
     candidate_pool: List[Question] = validated if validated else questions
-    fallback = fallback_question(next_slot.name, session.language)
+    fallback = postmortem_fallback(next_slot.name, session.language)
 
     for candidate in candidate_pool:
         if candidate.slot_name and candidate.slot_name != next_slot.name:
