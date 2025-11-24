@@ -1,287 +1,188 @@
-# EL (Eager Learner) - A Bilingual Thinking Partner
+## EL (Eager Learner) / 好奇心駆動インタビューエージェント
+
+EL は、**Discord 上で動作する思考パートナーBot** と  
+**暗黙知抽出・VoI（情報価値）ベースのエージェント群** をまとめたリポジトリです。
+
+- 対話を通じてユーザーの考えを深掘りする Discord Bot「EL」
+- テキストから KG（知識グラフ）を抽出する FastAPI（`agent/`）
+- VoI/Slot/Strategist を備えた次世代エージェント基盤（`el-agent/`）
+
+詳細なアーキテクチャとロードマップは `docs/CURIOUS_AGENT_FINAL.md` を参照してください。
 
 ---
 
-## Implicit Knowledge Extraction Agent (API) – WIP
+## 1. まず試すなら：Discord Bot EL
 
-このリポジトリには現在、Discord Bot「EL」に加えて、**暗黙知抽出エージェント (FastAPI)** の実装が進行中です。
+### 1.1 必要環境
 
-| 完了ステージ | 概要 |
-|--------------|------|
-| Stage① Context | 元テキストから 3 層要約 (rag_keys / mid / global) を生成し、任意で Redis Stream へ publish |
-| Stage② Extraction | OpenAI Function-calling でエンティティ・リレーションを抽出 (`save_kv`) |
-| Stage③ Merge | 抽出 KG を Neo4j にマージ、logprob から信頼度を算出 |
-| Stage④ Slots | KG を分析し、未充足スロットを最大 3 件提案 |
-| Stage⑤ Gap Analysis | SlotRegistry から優先度を計算 (`importance × (1 - filled) × recency`) |
-| Stage⑥ Question Gen | スロットごとの質問をテンプレートベースで生成 |
-| Stage⑦ Question QA | specificity / tacit_power ≥ 0.7 の質問のみ採用 |
+- Python 3.11 推奨（3.8 以上で動作想定）
+- Discord Bot トークン
+- OpenAI API キー
 
-## v2 – 実装済み機能の概要
-
-- **Core/Reasoning**
-  - Orchestrator による推論ループのWAL出力（`logs/wal/*.log`）。出力はPIIマスキング適用。
-  - Strategist: 不確実性と行動コストから `ask|search|none` を選択（停止しきい値あり）。
-  - KnowledgeIntegrator: Elasticsearch(BM25) と Qdrant(ベクトル) の RRF 融合、軽量リランキング、文単位抽出、`Evidence` 生成。
-  - Evaluator/Confidence: 特徴量（cosine, source_trust, recency, logic_ok, redundancy）から信頼度寄与を算出し、`belief` をロジット空間で更新。`config/weights/weights.json` または `EL_EVAL_WEIGHTS` による較正重み読込対応。
-- **LLM/Prompts**
-  - 仮説候補生成・エビデンス抽出・質問生成・文書合成・質問ストラテジスト・QAリファインをJSON厳守で実装。
-  - `EL_PROMPT_VARIANTS_DIR` 等で外部ファイルからプロンプト差し替え可能（ハードコード回避）。
-- **Retrieval/Stores**
-  - `ESClient`（BM25）、`QdrantStore`（HNSW/EF設定/バッチUpsert）、`Neo4jStore`、`RedisStore`。
-- **Monitoring/Security**
-  - Prometheusメトリクス（`/metrics`）：レイテンシ、LLMコール、リトリーバル段階別カウント等。
-  - JWT認証（Auth0想定、RS256）。PIIマスキング（メール/電話/住所のトークン化、`user_id_hash`）。
-
-詳細は `IMPLEMENTATION_PLAN.md` と `docs/OPERATIONS.md` を参照してください。
-
-### ディレクトリ構成 (抜粋)
-
-```
-agent/
-  api/            # FastAPI エンドポイント (/extract など)
-  pipeline/       # 上記 7 ステージ実装
-  prompts/        # システム・テンプレートプロンプト
-  llm/            # OpenAIClient ラッパー & function schemas
-  kg/             # Neo4j クライアント
-  slots/          # SlotRegistry & GapAnalysis
-  models/         # pydantic モデル
-tests/            # pytest によるユニットテスト
-```
-
-```
-el-agent/
-  src/el_agent/
-    core/         # v2: orchestrator / knowledge_integrator / strategist / evaluator
-    llm/          # v2: prompts（外部差し替え対応）, OpenAI クライアント
-    monitoring/   # v2: Prometheus メトリクス
-    stores/       # v2: neo4j / qdrant / redis ストア
-    retrieval/    # v2: Elasticsearch クライアント
-```
-
-### エンドポイント
-
-| Method | Path | 説明 |
-|--------|------|------|
-| POST | `/extract` | 抽出（Stage②）を実行し、`KGPayload` を返却（JWT必須） |
-| POST | `/stream_pipeline` | context → extract → slots の進捗をSSEで返却（JWT必須） |
-| POST | `/kg/submit` | KG 事実の登録（JWT必須） |
-| POST | `/kg/approve` | KG 事実の承認（JWT必須） |
-| GET | `/metrics` | Prometheus メトリクスのエンドポイント |
-
-### 依存関係のインストール
+### 1.2 セットアップ
 
 ```bash
+git clone https://github.com/PROJECT-CHTND/EL.git
+cd EL
+
 pip install -r requirements.txt
 ```
 
-追加で以下の環境変数を設定してください (例 `.env`):
-
-```
-OPENAI_API_KEY="sk-..."
-NEO4J_URI="bolt://localhost:7687"
-NEO4J_USER="neo4j"
-NEO4J_PASSWORD="password"
-REDIS_URL="redis://localhost:6379"          # 任意
-AUTO_INGEST_NEO4J="1"                      # 自動マージを有効化
-AUTH0_DOMAIN="your-tenant.auth0.com"        # JWT検証
-AUTH0_AUDIENCE="https://api.example.com"    # JWT検証
-PII_SALT="random_salt"                      # PIIマスキング
-EL_EVAL_WEIGHTS="/absolute/path/to/config/weights/weights.json"  # 任意: 評価器の較正重み
-EL_PROMPT_VARIANTS_DIR="/absolute/path/to/prompts"               # 任意: プロンプト差し替え
-```
-
-### サーバ起動（例）
+ルートに `.env` を作成し、最低限の環境変数を設定します。
 
 ```bash
-uvicorn agent.api.main:app --reload
+DISCORD_BOT_TOKEN="YOUR_DISCORD_BOT_TOKEN"
+OPENAI_API_KEY="YOUR_OPENAI_API_KEY"
+OPENAI_MODEL="gpt-4o"
+
+# セッション永続化（SQLite）
+EL_SQLITE_PATH="./data/el_sessions.db"
+
+# トレース / WAL ログ
+EL_TRACE=1
+EL_TRACE_DIR="./logs/wal"
+
+# メトリクス公開ポート（Prometheus）
+METRICS_PORT=8000
 ```
 
-Swagger: `http://localhost:8000/docs`
-
-### テスト
-
-pytest を利用して各ステージのユニットテストを実行できます。
-
-```bash
-pytest -q
-```
-
-### ローカルで CI を再現する
-
-GitHub Actions と同じチェック (pytest + mypy) を手元で走らせるには Makefile を用意しています。
-
-```bash
-# 依存インストール (仮想環境 .venv)
-make install
-
-# 型チェック + テスト実行
-make ci
-```
-
-`python3.11` が無い場合は `make PYTHON=python3.10 install` のようにバージョンを指定できます。
-
-### 中間データトレース（EL_TRACE）
-
-各ステージの中間データ（抽出されたKG、付与された信頼度、提案スロット、生成/検証済み質問など）をJSONLで記録できます。
-
-1) 有効化
-
-```bash
-export EL_TRACE=1
-# 任意: 出力先（既定: logs/wal/trace_YYYYMMDD.log）
-export EL_TRACE_DIR="/absolute/path/to/logs/wal"
-```
-
-2) 実行（BotまたはAPI）後、以下のように確認できます:
-
-```bash
-# 直近のトレースを閲覧
-tail -n 50 logs/wal/trace_*.log
-
-# 例: 抽出されたKG（エンティティ/リレーション数）
-jq 'select(.stage=="stage02_extract" and .kind=="parsed_kg") | {ts, counts: {entities: (.payload.entities|length), relations: (.payload.relations|length)}}' logs/wal/trace_*.log
-
-# 例: 提案スロット
-jq 'select(.stage=="stage04_slots" and .kind=="proposed_slots") | {ts, slots: .payload}' logs/wal/trace_*.log
-
-# 例: 生成/検証済み質問
-jq 'select((.stage=="stage06_qgen" and .kind=="generated_questions") or (.stage=="stage07_qcheck" and .kind=="validated_questions")) | {ts, stage, kind, questions: [.payload[].text]}' logs/wal/trace_*.log
-```
-
-3) プロンプト変更の効果比較
-
-- `EL_PROMPT_VARIANTS_DIR` でプロンプト差し替えを行い、各バリアントで同一入力を実行
-- ログ（trace_*.log）をA/Bで保存し、上記の`jq`で件数・内容差分を比較
-
-メモ: PIIは可能な範囲でマスキングされます（`el-agent/utils/pii.py`）。
-
-### 運用 Runbook
-
-詳細な運用手順・アラート設定は `docs/OPERATIONS.md` を参照してください。
-
-### パイプラインをコマンドラインで試す (`pipeline_cli.py`)
-
-以下のスクリプトで、FastAPI サーバを立てずに 7 ステージ・パイプラインを単体実行できます。
-
-```bash
-python scripts/pipeline_cli.py input.txt --focus "AI" --temp 0.3
-```
-
-- **`input.txt`** : 抽出対象の本文ファイル (UTF-8) を指定します。
-- **`--focus`**    : (任意) 重点的に抽出したいキーワード。例 `--focus "生成AI"`。
-- **`--temp`**     : (任意) OpenAI temperature。デフォルト 0.0。
-
-環境変数 `.env` に設定した `OPENAI_API_KEY` が必須です。さらに
-`NEO4J_*` や `REDIS_URL` を設定すると、ステージ③で自動マージ、ステージ①で
-Redis Stream への publish が行われます。
-
-実行例の出力順:
-1. Stage01 コンテキスト3分割
-2. Stage02 KG 抽出
-3. Stage04 スロット提案
-4. Stage06/07 質問生成 → QA 結果
-
----
-
-### OpenAPI
-
-サーバー起動後、`/docs` (Swagger UI) または `/openapi.json` でスキーマを確認できます。
-
----
-
-## 概要
-
-ELは、Discord上で対話を通じてユーザーの考えや洞察を深める手助けをするためのBotです。指定されたトピックについて、Botが知識に基づいた探求的な質問を投げかけ、ユーザーが自分の考えを整理し、新しい視点を発見することをサポートします。
-
-**日本語と英語の両方に対応しています。**
-
-## 主な機能
-
--   **バイリンガル対話**: `!explore` コマンドで指定したトピックの言語（日本語または英語）を自動で検出し、その言語で対話を開始します。
--   **探求的な質問**: AIを活用し、対話の文脈に応じてユーザーの思考を促す質問を生成します。
--   **セッションの振り返り**: `!reflect` コマンドで、いつでも対話の途中経過や発見を要約して確認できます。
--   **対話の記録**: `!finish` コマンドでセッションを終了すると、対話の全記録がMarkdownファイルとして保存されます。
-
-さらに、会話内容から得られた知識や洞察を、RAG（Retrieval-Augmented Generation）システムで活用しやすいように構造化されたJSONL形式(`.jsonl`)のファイルとしても同時に出力します。
-
-## 動作環境
-
--   Python 3.8 以上
-
-## セットアップ方法
-
-1.  **リポジトリのクローンまたはダウンロード**
-    
-    このプロジェクトのファイルをローカル環境に配置します。
-    
-2.  **必要なライブラリのインストール**
-    
-    ターミナルで以下のコマンドを実行し、必要なPythonライブラリをインストールします。
-    
-    ```bash
-    pip install -r requirements.txt
-    ```
-    
-3.  **環境変数の設定**
-    
-    プロジェクトのルートディレクトリに `.env` という名前のファイルを作成し、以下の内容を記述します。
-    
-    ```
-    DISCORD_BOT_TOKEN="YOUR_DISCORD_BOT_TOKEN"
-    OPENAI_API_KEY="YOUR_OPENAI_API_KEY"
-    ```
-    
-    -   `YOUR_DISCORD_BOT_TOKEN`: あなたのDiscord Botのトークンに置き換えてください。トークンは [Discord Developer Portal](https://discord.com/developers/applications) で取得できます。
-    -   `YOUR_OPENAI_API_KEY`: あなたのOpenAI APIキーに置き換えてください。キーは [OpenAI Platform](https://platform.openai.com/api-keys) で取得できます。
-    
-
-## Botの起動方法
-
-セットアップが完了したら、ターミナルで以下のコマンドを実行してBotを起動します。
+### 1.3 起動と使い方
 
 ```bash
 python nani_bot.py
 ```
 
-コンソールに `🧠 EL has started!` と表示されれば成功です。
+- コンソールに `🧠 EL has started!` が出れば起動成功
+- Discord の任意チャンネルで:
 
-## コマンド一覧
+```text
+!explore 最近感動したこと
+```
 
-### `!explore [トピック]`
+Bot が専用スレッドを作成し、そのトピックに対して**日本語または英語で探求的な質問**を投げかけます。
 
-新しい思考の探求セッションを開始します。Botはトピックの言語を自動で判別し、その言語であなた専用のスレッドを作成して最初の質問を投げかけます。
+利用可能な主なコマンド:
 
-**使用例:**
+- `!explore [トピック]`  
+  新しいセッションを開始（言語は自動判定）
+- `!reflect`  
+  これまでの対話から「主な発見」「深まった理解」「今後の問い」を要約
+- `!finish`  
+  対話ログ（Markdown）と RAG 用 JSONL を生成してスレッドに添付
 
--   **日本語での開始:**
-    
-    ```
-    !explore 最近感動したこと
-    ```
-    
--   **英語での開始:**
-    
-    ```
-    !explore something that moved me recently
-    ```
-    
+---
 
-### `!reflect`
+## 2. API として使う：Implicit Knowledge Extraction Agent（`agent/`）
 
-現在進行中のセッションの内容を振り返ります。これまでの対話から得られた「主な発見」や「深まった理解」などを、セッションで使われている言語でまとめたメッセージが送信されます。
+テキストからエンティティ・リレーション・スロット候補を抽出する FastAPI アプリです。
 
-### `!finish`
+### 2.1 起動
 
-セッションを終了し、対話の全記録をMarkdownファイル(`.md`)として出力します。この記録もセッションの言語で生成されます。
+```bash
+pip install -r requirements.txt
 
-さらに、会話内容から得られた知識や洞察を、RAG（Retrieval-Augmented Generation）システムで活用しやすいように構造化されたJSONL形式(`.jsonl`)のファイルとしても同時に出力します。
+uvicorn agent.api.main:app --reload
+```
 
-## ファイル構成（主要）
+- OpenAPI: `http://localhost:8000/docs`
+- 主なエンドポイント:
 
-- `agent/` : 暗黙知抽出エージェント (FastAPI) の実装
-- `tests/` : pytest ユニットテスト
-- `docs/OPERATIONS.md` : 運用 Runbook
-- `README.md` : 本ドキュメント
-- `requirements.txt` : ランタイム依存ライブラリ
-- `dev-requirements.txt` : 開発 / CI 用ライブラリ
-- `Makefile` : ローカル CI コマンド (`make ci` など) 
+| Method | Path                | 説明                                          |
+|--------|---------------------|-----------------------------------------------|
+| POST   | `/extract`          | KG 抽出（Stage②）→ `KGPayload` を返す       |
+| POST   | `/stream_pipeline`  | Stage01–04 の進捗を SSE でストリーミング    |
+| POST   | `/kg/submit`        | KG 事実の登録                                 |
+| POST   | `/kg/approve`       | KG 事実の承認                                 |
+| GET    | `/metrics`          | Prometheus 形式のメトリクスを返却            |
+
+環境変数（例）:
+
+```bash
+OPENAI_API_KEY="sk-..."
+NEO4J_URI="bolt://localhost:7687"
+NEO4J_USER="neo4j"
+NEO4J_PASSWORD="password"
+REDIS_URL="redis://localhost:6379"          # 任意
+EL_EVAL_WEIGHTS="/absolute/path/to/config/weights/weights.json"  # 任意
+EL_PROMPT_VARIANTS_DIR="/absolute/path/to/prompts"               # 任意
+```
+
+---
+
+## 3. VoI/Slot ベースのエージェント基盤：`el-agent/`
+
+`el-agent/` 以下には、VoI（情報価値）と Slot/Strategist を用いた次世代エージェントのコア実装があります。
+
+- `core/strategist.py` : `ask/search/none` を選択する Strategist
+- `core/knowledge_integrator.py` : BM25 / ベクトル検索の統合
+- `monitoring/metrics.py` : Prometheus メトリクス
+
+詳細な起動方法は `el-agent/README.md` を参照してください（Poetry ベース）。
+
+### 3.1 VoI / 停止しきい値の設定（M2 準備）
+
+Strategist の VoI/停止しきい値は、環境変数で調整できます。
+
+- `EL_VOI_TAU_STOP`  
+  `ask/search/none` を切り替えるための停止しきい値（既定: `0.08`）
+
+```bash
+export EL_VOI_TAU_STOP=0.05  # しきい値を下げて、より積極的に質問を続ける
+```
+
+---
+
+## 4. 可観測性とメトリクス
+
+- Discord Bot 起動時、`METRICS_PORT` で Prometheus 互換メトリクスを公開
+- `ops/prometheus.yml` / `ops/grafana/` により、ローカルで
+
+```bash
+docker compose up -d prometheus loki promtail grafana
+```
+
+を実行すると、Grafana の「EL Agent Overview」ダッシュボードから
+
+- Turn latency (p50/p90/p99)
+- Slot coverage
+- QCheck duplicate rate
+- WAL ログ（Loki）
+
+などを閲覧できます。
+
+---
+
+## 5. テストとローカル CI
+
+### 5.1 pytest
+
+ルートのテストは pytest で実行できます。
+
+```bash
+python -m pytest -q
+```
+
+### 5.2 Makefile による簡易 CI
+
+```bash
+make install   # .venv 作成 + 依存インストール
+make ci        # pytest -q + mypy agent
+```
+
+Python バージョンを変えたい場合:
+
+```bash
+make PYTHON=python3.10 install
+```
+
+---
+
+## 6. 参考ドキュメント
+
+- `docs/CURIOUS_AGENT_FINAL.md`  
+  好奇心駆動インタビューエージェントの最終設計書（M1〜M3・R4）
+- `docs/R4_RESEARCH_TRACK.md`  
+  研究トラック（方策最適化/VoI チューニング等）のメモ
+
+これらを読みつつ、まずは **「1. Discord Bot EL」** から動かしてみると、
+リポジトリ全体の目的と挙動をつかみやすくなります。
