@@ -1179,4 +1179,10 @@ if __name__ == "__main__":
         print("❌ DISCORD_BOT_TOKEN is not set.")
     else:
         print("🧠 EL is starting...")
+        # Prometheusメトリクスサーバを起動（METRICS_PORT 環境変数でポート指定可）
+        try:
+            start_metrics_server()
+        except Exception:
+            # メトリクスが起動できなくてもBot自体は動作させる
+            pass
         bot.run(token) 
