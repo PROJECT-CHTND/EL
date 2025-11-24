@@ -24,6 +24,7 @@ from agent.models.kg import KGPayload
 from agent.slots import Slot, SlotRegistry
 from agent.stores.sqlite_store import SqliteSessionRepository
 from agent.slots.postmortem import build_postmortem_registry, fallback_question
+from agent.monitoring.metrics import start_metrics_server
 
 import asyncio
 import io
@@ -1176,4 +1177,10 @@ if __name__ == "__main__":
         print("❌ DISCORD_BOT_TOKEN is not set.")
     else:
         print("🧠 EL is starting...")
+        # Prometheusメトリクスサーバを起動（METRICS_PORT 環境変数でポート指定可）
+        try:
+            start_metrics_server()
+        except Exception:
+            # メトリクスが起動できなくてもBot自体は動作させる
+            pass
         bot.run(token) 
