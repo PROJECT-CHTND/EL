@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EL - Eager Learner</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Noto Sans JP', sans-serif;
+        }
+        .chat-container {
+            height: calc(100vh - 200px);
+        }
+        .message-enter {
+            animation: messageEnter 0.3s ease-out;
+        }
+        @keyframes messageEnter {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        .typing-indicator span {
+            animation: typing 1.4s infinite both;
+        }
+        .typing-indicator span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+        .typing-indicator span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+        @keyframes typing {
+            0%, 60%, 100% {
+                transform: translateY(0);
+            }
+            30% {
+                transform: translateY(-4px);
+            }
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 min-h-screen">
+    <div class="container mx-auto px-4 py-8 max-w-4xl">
+        <!-- Header -->
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-bold text-white mb-2">
+                <span class="text-purple-400">EL</span> - Eager Learner
+            </h1>
+            <p class="text-gray-400">好奇心駆動インタビューエージェント</p>
+        </header>
+
+        <!-- Session Start Form (shown when no active session) -->
+        <div id="start-screen" class="bg-white/10 backdrop-blur-lg rounded-2xl p-8 shadow-xl">
+            <h2 class="text-2xl font-semibold text-white mb-6 text-center">
+                💭 何について話しましょうか？
+            </h2>
+            <form id="start-form" class="space-y-4">
+                <div>
+                    <label for="topic" class="block text-gray-300 mb-2">トピック</label>
+                    <input 
+                        type="text" 
+                        id="topic" 
+                        placeholder="例: 最近感動したこと、今取り組んでいるプロジェクト..."
+                        class="w-full px-4 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                        required
+                    >
+                </div>
+                <button 
+                    type="submit"
+                    class="w-full py-3 px-6 bg-purple-600 hover:bg-purple-700 text-white font-semibold rounded-xl transition-colors duration-200 flex items-center justify-center gap-2"
+                >
+                    <span>探求を始める</span>
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6"></path>
+                    </svg>
+                </button>
+            </form>
+        </div>
+
+        <!-- Chat Interface (shown during active session) -->
+        <div id="chat-screen" class="hidden">
+            <!-- Session Info -->
+            <div class="bg-white/10 backdrop-blur-lg rounded-xl p-4 mb-4 flex items-center justify-between">
+                <div>
+                    <span class="text-gray-400 text-sm">トピック:</span>
+                    <span id="session-topic" class="text-white font-medium ml-2"></span>
+                </div>
+                <div class="flex items-center gap-4">
+                    <div id="domain-badge" class="px-3 py-1 rounded-full text-sm bg-purple-500/30 text-purple-300">
+                        general
+                    </div>
+                    <button 
+                        id="end-session-btn"
+                        class="text-gray-400 hover:text-red-400 transition-colors"
+                        title="セッション終了"
+                    >
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Chat Messages -->
+            <div id="chat-messages" class="chat-container bg-white/5 backdrop-blur-lg rounded-2xl p-6 overflow-y-auto mb-4 space-y-4">
+                <!-- Messages will be inserted here -->
+            </div>
+
+            <!-- Input Form -->
+            <form id="chat-form" class="flex gap-3">
+                <input 
+                    type="text" 
+                    id="message-input"
+                    placeholder="メッセージを入力..."
+                    class="flex-1 px-4 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                    autocomplete="off"
+                >
+                <button 
+                    type="submit"
+                    id="send-btn"
+                    class="px-6 py-3 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-colors duration-200"
+                >
+                    送信
+                </button>
+            </form>
+        </div>
+
+        <!-- Stats Footer -->
+        <div id="stats" class="hidden mt-4 text-center text-gray-500 text-sm">
+            <span>💎 保存した洞察: <span id="insights-count">0</span></span>
+            <span class="mx-3">|</span>
+            <span>📚 活用した知識: <span id="knowledge-count">0</span></span>
+        </div>
+    </div>
+
+    <script>
+        // State
+        let sessionId = null;
+        let totalInsights = 0;
+        let totalKnowledge = 0;
+
+        // DOM Elements
+        const startScreen = document.getElementById('start-screen');
+        const chatScreen = document.getElementById('chat-screen');
+        const startForm = document.getElementById('start-form');
+        const chatForm = document.getElementById('chat-form');
+        const topicInput = document.getElementById('topic');
+        const messageInput = document.getElementById('message-input');
+        const chatMessages = document.getElementById('chat-messages');
+        const sessionTopic = document.getElementById('session-topic');
+        const domainBadge = document.getElementById('domain-badge');
+        const endSessionBtn = document.getElementById('end-session-btn');
+        const sendBtn = document.getElementById('send-btn');
+        const stats = document.getElementById('stats');
+        const insightsCount = document.getElementById('insights-count');
+        const knowledgeCount = document.getElementById('knowledge-count');
+
+        // API Base URL
+        const API_BASE = window.location.origin;
+
+        // Domain emoji mapping
+        const domainEmoji = {
+            'daily_work': '💼',
+            'recipe': '🍳',
+            'postmortem': '🔍',
+            'creative': '🎨',
+            'general': '💭'
+        };
+
+        // Start session
+        startForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const topic = topicInput.value.trim();
+            if (!topic) return;
+
+            try {
+                const response = await fetch(`${API_BASE}/api/sessions`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ topic, user_id: 'web-user' })
+                });
+
+                if (!response.ok) throw new Error('Failed to start session');
+
+                const data = await response.json();
+                sessionId = data.session_id;
+
+                // Update UI
+                sessionTopic.textContent = topic;
+                startScreen.classList.add('hidden');
+                chatScreen.classList.remove('hidden');
+                stats.classList.remove('hidden');
+
+                // Add opening message
+                addMessage(data.opening_message, 'assistant');
+                messageInput.focus();
+
+            } catch (error) {
+                console.error('Error starting session:', error);
+                alert('セッションの開始に失敗しました。サーバーが起動しているか確認してください。');
+            }
+        });
+
+        // Send message
+        chatForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const message = messageInput.value.trim();
+            if (!message || !sessionId) return;
+
+            // Add user message
+            addMessage(message, 'user');
+            messageInput.value = '';
+            sendBtn.disabled = true;
+
+            // Show typing indicator
+            const typingId = showTypingIndicator();
+
+            try {
+                const response = await fetch(`${API_BASE}/api/sessions/${sessionId}/messages`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message })
+                });
+
+                if (!response.ok) throw new Error('Failed to send message');
+
+                const data = await response.json();
+
+                // Remove typing indicator
+                removeTypingIndicator(typingId);
+
+                // Add assistant message
+                addMessage(data.response, 'assistant');
+
+                // Update domain badge
+                updateDomainBadge(data.domain);
+
+                // Update stats
+                totalInsights += data.insights_saved;
+                totalKnowledge += data.knowledge_used;
+                insightsCount.textContent = totalInsights;
+                knowledgeCount.textContent = totalKnowledge;
+
+                // Show insight notification
+                if (data.insights_saved > 0) {
+                    showNotification(`💎 ${data.insights_saved}件の洞察を記録しました`);
+                }
+
+            } catch (error) {
+                console.error('Error sending message:', error);
+                removeTypingIndicator(typingId);
+                addMessage('申し訳ありません、エラーが発生しました。', 'error');
+            } finally {
+                sendBtn.disabled = false;
+                messageInput.focus();
+            }
+        });
+
+        // End session
+        endSessionBtn.addEventListener('click', async () => {
+            if (!sessionId) return;
+            if (!confirm('セッションを終了しますか？')) return;
+
+            try {
+                await fetch(`${API_BASE}/api/sessions/${sessionId}`, {
+                    method: 'DELETE'
+                });
+            } catch (error) {
+                console.error('Error ending session:', error);
+            }
+
+            // Reset UI
+            sessionId = null;
+            totalInsights = 0;
+            totalKnowledge = 0;
+            chatMessages.innerHTML = '';
+            topicInput.value = '';
+            startScreen.classList.remove('hidden');
+            chatScreen.classList.add('hidden');
+            stats.classList.add('hidden');
+        });
+
+        // Helper functions
+        function addMessage(text, type) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message-enter flex ${type === 'user' ? 'justify-end' : 'justify-start'}`;
+
+            const bubble = document.createElement('div');
+            bubble.className = type === 'user' 
+                ? 'max-w-[80%] px-4 py-3 rounded-2xl bg-purple-600 text-white'
+                : type === 'error'
+                ? 'max-w-[80%] px-4 py-3 rounded-2xl bg-red-500/20 text-red-300'
+                : 'max-w-[80%] px-4 py-3 rounded-2xl bg-white/10 text-gray-100';
+
+            bubble.innerHTML = text.replace(/\n/g, '<br>');
+            messageDiv.appendChild(bubble);
+            chatMessages.appendChild(messageDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        function showTypingIndicator() {
+            const id = 'typing-' + Date.now();
+            const div = document.createElement('div');
+            div.id = id;
+            div.className = 'flex justify-start message-enter';
+            div.innerHTML = `
+                <div class="px-4 py-3 rounded-2xl bg-white/10">
+                    <div class="typing-indicator flex gap-1">
+                        <span class="w-2 h-2 bg-gray-400 rounded-full"></span>
+                        <span class="w-2 h-2 bg-gray-400 rounded-full"></span>
+                        <span class="w-2 h-2 bg-gray-400 rounded-full"></span>
+                    </div>
+                </div>
+            `;
+            chatMessages.appendChild(div);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+            return id;
+        }
+
+        function removeTypingIndicator(id) {
+            const element = document.getElementById(id);
+            if (element) element.remove();
+        }
+
+        function updateDomainBadge(domain) {
+            const emoji = domainEmoji[domain] || '💭';
+            domainBadge.textContent = `${emoji} ${domain}`;
+        }
+
+        function showNotification(text) {
+            const notification = document.createElement('div');
+            notification.className = 'fixed bottom-4 right-4 px-4 py-2 bg-purple-600 text-white rounded-lg shadow-lg message-enter';
+            notification.textContent = text;
+            document.body.appendChild(notification);
+            setTimeout(() => notification.remove(), 3000);
+        }
+    </script>
+</body>
+</html>
