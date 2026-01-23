@@ -3,262 +3,920 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>EL - Eager Learner</title>
+    <title>EL - Evidence Ledger</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+JP:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['IBM Plex Sans', 'IBM Plex Sans JP', 'system-ui', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    },
+                    colors: {
+                        surface: {
+                            0: '#0f1114',
+                            1: '#16181d',
+                            2: '#1e2128',
+                            3: '#262a33',
+                            4: '#2e333e',
+                        },
+                        accent: {
+                            DEFAULT: '#e5a84b',
+                            dim: '#b8863c',
+                            bright: '#f5c46b',
+                        },
+                        verified: '#4ade80',
+                        conflict: '#f87171',
+                        pending: '#94a3b8',
+                    }
+                }
+            }
+        }
+    </script>
     <style>
-        body {
-            font-family: 'Noto Sans JP', sans-serif;
+        * {
+            font-family: 'IBM Plex Sans', 'IBM Plex Sans JP', system-ui, sans-serif;
         }
-        .chat-container {
-            height: calc(100vh - 200px);
+        
+        /* Subtle entry animation */
+        .fade-up {
+            animation: fadeUp 0.2s ease-out;
         }
-        .message-enter {
-            animation: messageEnter 0.3s ease-out;
+        @keyframes fadeUp {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
         }
-        @keyframes messageEnter {
-            from {
-                opacity: 0;
-                transform: translateY(10px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+        
+        /* Minimal typing indicator */
+        .typing-dot {
+            animation: typingDot 1.2s infinite;
         }
-        .typing-indicator span {
-            animation: typing 1.4s infinite both;
+        .typing-dot:nth-child(2) { animation-delay: 0.15s; }
+        .typing-dot:nth-child(3) { animation-delay: 0.3s; }
+        @keyframes typingDot {
+            0%, 60%, 100% { opacity: 0.3; }
+            30% { opacity: 1; }
         }
-        .typing-indicator span:nth-child(2) {
-            animation-delay: 0.2s;
+        
+        /* Custom scrollbar - minimal */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
+        
+        /* Focus states */
+        input:focus, textarea:focus, button:focus-visible {
+            outline: 2px solid rgba(229, 168, 75, 0.5);
+            outline-offset: 1px;
         }
-        .typing-indicator span:nth-child(3) {
-            animation-delay: 0.4s;
+        
+        /* Textarea */
+        .msg-input {
+            resize: none;
+            min-height: 44px;
+            max-height: 160px;
         }
-        @keyframes typing {
-            0%, 60%, 100% {
-                transform: translateY(0);
-            }
-            30% {
-                transform: translateY(-4px);
-            }
+        
+        /* Markdown in messages */
+        .prose-msg p { margin-bottom: 0.5rem; }
+        .prose-msg p:last-child { margin-bottom: 0; }
+        .prose-msg ul, .prose-msg ol { margin: 0.5rem 0 0.5rem 1.25rem; }
+        .prose-msg ul { list-style: disc; }
+        .prose-msg ol { list-style: decimal; }
+        .prose-msg li { margin-bottom: 0.125rem; }
+        .prose-msg strong { font-weight: 600; color: #f1f5f9; }
+        .prose-msg code {
+            background: rgba(255,255,255,0.06);
+            padding: 0.125rem 0.375rem;
+            border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.875em;
+        }
+        .prose-msg pre {
+            background: rgba(0,0,0,0.3);
+            padding: 0.75rem;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin: 0.5rem 0;
+        }
+        .prose-msg pre code { background: transparent; padding: 0; }
+        
+        /* Knowledge Map container */
+        #knowledge-map-canvas {
+            width: 100%;
+            height: 200px;
+        }
+        
+        /* Topic chip */
+        .topic-chip {
+            transition: background 0.15s, border-color 0.15s;
+        }
+        .topic-chip.covered { border-color: #4ade80; }
+        .topic-chip.needs-verify { border-color: #e5a84b; }
+        .topic-chip.missing { border-color: #94a3b8; }
+        
+        /* Fact row */
+        .fact-row {
+            transition: background 0.1s;
+        }
+        .fact-row:hover {
+            background: rgba(255,255,255,0.03);
+        }
+        
+        /* Status badge pulse for events */
+        .pulse-once {
+            animation: pulseOnce 0.3s ease-out;
+        }
+        @keyframes pulseOnce {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+            100% { transform: scale(1); }
+        }
+        
+        /* Session status indicators */
+        .status-draft { color: #94a3b8; }
+        .status-verified { color: #4ade80; }
+        .status-conflict { color: #f87171; }
+        
+        /* Responsive */
+        @media (max-width: 1280px) {
+            #app-grid { grid-template-columns: 240px 1fr 340px; }
+        }
+        @media (max-width: 1024px) {
+            #app-grid { grid-template-columns: 1fr 340px; }
+            #left-pane { display: none; }
+        }
+        @media (max-width: 768px) {
+            #app-grid { grid-template-columns: 1fr; }
+            #right-pane { display: none; }
         }
     </style>
 </head>
-<body class="bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 min-h-screen">
-    <div class="container mx-auto px-4 py-8 max-w-4xl">
-        <!-- Header -->
-        <header class="text-center mb-8">
-            <h1 class="text-4xl font-bold text-white mb-2">
-                <span class="text-purple-400">EL</span> - Eager Learner
-            </h1>
-            <p class="text-gray-400">好奇心駆動インタビューエージェント</p>
+<body class="bg-surface-0 text-slate-300 min-h-screen">
+    <!-- Toast Container -->
+    <div id="toast-container" class="fixed top-4 right-4 z-50 space-y-2 pointer-events-none"></div>
+
+    <div class="h-screen flex flex-col">
+        <!-- Header - minimal -->
+        <header class="flex-none h-12 px-4 flex items-center justify-between border-b border-white/5">
+            <div class="flex items-center gap-3">
+                <h1 class="text-sm font-semibold text-white tracking-tight">
+                    EL<span class="text-slate-500 font-normal ml-1.5">Evidence Ledger</span>
+                </h1>
+            </div>
+            <div class="flex items-center gap-2 text-xs text-slate-500">
+                <span id="header-status">待機中</span>
+            </div>
         </header>
 
-        <!-- Session Start Form (shown when no active session) -->
-        <div id="start-screen" class="bg-white/10 backdrop-blur-lg rounded-2xl p-8 shadow-xl">
-            <h2 class="text-2xl font-semibold text-white mb-6 text-center">
-                💭 何について話しましょうか？
-            </h2>
-            <form id="start-form" class="space-y-4">
-                <div>
-                    <label for="topic" class="block text-gray-300 mb-2">トピック</label>
+        <!-- Main 3-pane layout -->
+        <div id="app-grid" class="flex-1 grid grid-cols-[260px_1fr_380px] min-h-0">
+            
+            <!-- ===== LEFT PANE: Sessions Archive ===== -->
+            <aside id="left-pane" class="border-r border-white/5 flex flex-col min-h-0">
+                <div class="flex-none p-3 border-b border-white/5">
                     <input 
-                        type="text" 
-                        id="topic" 
-                        placeholder="例: 最近感動したこと、今取り組んでいるプロジェクト..."
-                        class="w-full px-4 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-                        required
+                        id="session-search"
+                        type="text"
+                        placeholder="検索..."
+                        class="w-full px-3 py-2 bg-surface-2 border border-white/5 rounded-lg text-sm placeholder-slate-500 text-white"
                     >
                 </div>
-                <button 
-                    type="submit"
-                    class="w-full py-3 px-6 bg-purple-600 hover:bg-purple-700 text-white font-semibold rounded-xl transition-colors duration-200 flex items-center justify-center gap-2"
-                >
-                    <span>探求を始める</span>
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6"></path>
-                    </svg>
-                </button>
-            </form>
-        </div>
-
-        <!-- Chat Interface (shown during active session) -->
-        <div id="chat-screen" class="hidden">
-            <!-- Session Info -->
-            <div class="bg-white/10 backdrop-blur-lg rounded-xl p-4 mb-4 flex items-center justify-between">
-                <div>
-                    <span class="text-gray-400 text-sm">トピック:</span>
-                    <span id="session-topic" class="text-white font-medium ml-2"></span>
-                </div>
-                <div class="flex items-center gap-4">
-                    <div id="domain-badge" class="px-3 py-1 rounded-full text-sm bg-purple-500/30 text-purple-300">
-                        general
+                <div class="flex-1 overflow-y-auto p-3">
+                    <div class="text-xs text-slate-500 uppercase tracking-wider mb-2">Sessions</div>
+                    <div id="session-list" class="space-y-1">
+                        <p class="text-xs text-slate-600 py-4 text-center">履歴がありません</p>
                     </div>
+                </div>
+            </aside>
+
+            <!-- ===== CENTER PANE: Interview ===== -->
+            <main id="center-pane" class="flex flex-col min-h-0 bg-surface-1">
+                
+                <!-- Start Screen -->
+                <div id="start-screen" class="flex-1 flex items-center justify-center p-6">
+                    <div class="w-full max-w-md">
+                        <div class="text-center mb-8">
+                            <h2 class="text-xl font-semibold text-white mb-2">新しいセッション</h2>
+                            <p class="text-sm text-slate-500">話したいことを入力してください</p>
+                        </div>
+                        <form id="start-form" class="space-y-4">
+                            <div>
+                                <label for="intent-input" class="block text-xs text-slate-400 mb-1.5">Intent（目的）</label>
+                                <input 
+                                    type="text" 
+                                    id="intent-input"
+                                    placeholder="例: 今日の業務を整理して後で検索できる形にしたい"
+                                    class="w-full px-4 py-3 bg-surface-2 border border-white/10 rounded-lg text-white placeholder-slate-500 text-sm"
+                                    required
+                                >
+                            </div>
+                            <button 
+                                type="submit"
+                                class="w-full py-3 bg-accent hover:bg-accent-bright text-surface-0 font-medium rounded-lg transition-colors text-sm"
+                            >
+                                開始
+                            </button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Chat Screen -->
+                <div id="chat-screen" class="hidden flex flex-col flex-1 min-h-0">
+                    
+                    <!-- Interview Control Bar -->
+                    <div id="control-bar" class="flex-none border-b border-white/5 bg-surface-1">
+                        <!-- Intent Row -->
+                        <div class="px-4 py-2.5 flex items-center gap-3 border-b border-white/5">
+                            <span class="text-[10px] uppercase tracking-wider text-slate-500 w-12">Intent</span>
+                            <p id="current-intent" class="flex-1 text-sm text-white truncate">—</p>
+                            <button id="edit-intent-btn" class="text-slate-500 hover:text-slate-300 text-xs">編集</button>
+                        </div>
+                        <!-- Topics Row -->
+                        <div class="px-4 py-2 flex items-center gap-3">
+                            <span class="text-[10px] uppercase tracking-wider text-slate-500 w-12">Topics</span>
+                            <div id="topic-chips" class="flex-1 flex flex-wrap gap-1.5">
+                                <span class="text-xs text-slate-600">—</span>
+                            </div>
+                            <button id="add-topic-btn" class="text-slate-500 hover:text-slate-300 text-xs">+ 追加</button>
+                        </div>
+                        <!-- State & Questions Row -->
+                        <div class="px-4 py-2 flex items-center gap-3 border-t border-white/5">
+                            <span class="text-[10px] uppercase tracking-wider text-slate-500 w-12">State</span>
+                            <div id="session-state" class="flex items-center gap-2">
+                                <span class="w-1.5 h-1.5 rounded-full bg-slate-500"></span>
+                                <span class="text-xs text-slate-400">Collecting</span>
+                            </div>
+                            <div class="flex-1"></div>
+                            <div id="next-question-hint" class="text-xs text-slate-500 truncate max-w-[200px]"></div>
+                        </div>
+                    </div>
+
+                    <!-- Messages -->
+                    <div id="chat-messages" class="flex-1 overflow-y-auto p-4 space-y-3">
+                    </div>
+
+                    <!-- Input -->
+                    <div class="flex-none p-4 border-t border-white/5">
+                        <form id="chat-form" class="flex gap-2">
+                            <textarea 
+                                id="message-input"
+                                placeholder="メッセージを入力..."
+                                rows="1"
+                                class="msg-input flex-1 px-4 py-2.5 bg-surface-2 border border-white/10 rounded-lg text-white placeholder-slate-500 text-sm"
+                            ></textarea>
+                            <button 
+                                type="submit"
+                                id="send-btn"
+                                class="px-4 py-2.5 bg-accent hover:bg-accent-bright disabled:bg-surface-3 disabled:text-slate-600 text-surface-0 font-medium rounded-lg transition-colors text-sm"
+                            >
+                                送信
+                            </button>
+                        </form>
+                        <p class="text-[10px] text-slate-600 mt-1.5">Enter で送信 · Shift+Enter で改行</p>
+                    </div>
+                </div>
+            </main>
+
+            <!-- ===== RIGHT PANE: Knowledge Studio ===== -->
+            <aside id="right-pane" class="border-l border-white/5 flex flex-col min-h-0 bg-surface-0">
+                
+                <!-- 1. Knowledge Map + Metrics -->
+                <div class="flex-none p-4 border-b border-white/5">
+                    <div class="flex items-center justify-between mb-3">
+                        <h3 class="text-xs font-medium text-slate-400 uppercase tracking-wider">Knowledge Map</h3>
+                        <button id="map-detail-btn" class="text-[10px] text-slate-500 hover:text-slate-300">詳細</button>
+                    </div>
+                    <div id="knowledge-map-canvas" class="bg-surface-1 rounded-lg overflow-hidden mb-3"></div>
+                    <div class="grid grid-cols-3 gap-2 text-center">
+                        <div class="bg-surface-2 rounded-lg p-2">
+                            <div id="metric-coverage" class="text-lg font-semibold text-white">0%</div>
+                            <div class="text-[10px] text-slate-500">Coverage</div>
+                        </div>
+                        <div class="bg-surface-2 rounded-lg p-2">
+                            <div id="metric-verified" class="text-lg font-semibold text-verified">0</div>
+                            <div class="text-[10px] text-slate-500">Verified</div>
+                        </div>
+                        <div class="bg-surface-2 rounded-lg p-2">
+                            <div id="metric-conflicts" class="text-lg font-semibold text-conflict">0</div>
+                            <div class="text-[10px] text-slate-500">Conflicts</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 2. Topic Coverage -->
+                <div class="flex-none p-4 border-b border-white/5">
+                    <div class="flex items-center justify-between mb-2">
+                        <h3 class="text-xs font-medium text-slate-400 uppercase tracking-wider">Topic Coverage</h3>
+                    </div>
+                    <div id="topic-coverage-list" class="flex flex-wrap gap-1.5">
+                        <span class="text-xs text-slate-600">トピックがありません</span>
+                    </div>
+                </div>
+
+                <!-- 3. Evidence Ledger (Fact Table) -->
+                <div class="flex-1 flex flex-col min-h-0 p-4">
+                    <div class="flex items-center justify-between mb-2">
+                        <h3 class="text-xs font-medium text-slate-400 uppercase tracking-wider">Evidence Ledger</h3>
+                        <span id="fact-count" class="text-[10px] text-slate-500">0 facts</span>
+                    </div>
+                    <div id="fact-table" class="flex-1 overflow-y-auto space-y-1">
+                        <p class="text-xs text-slate-600 py-4 text-center">まだ記録がありません</p>
+                    </div>
+                </div>
+
+                <!-- 4. Conflicts (collapsible) -->
+                <div id="conflicts-section" class="flex-none border-t border-white/5 hidden">
+                    <button id="conflicts-toggle" class="w-full px-4 py-2.5 flex items-center justify-between text-left hover:bg-surface-2 transition-colors">
+                        <span class="text-xs font-medium text-conflict">Conflicts</span>
+                        <span id="conflicts-count-badge" class="text-xs bg-conflict/20 text-conflict px-1.5 py-0.5 rounded">0</span>
+                    </button>
+                    <div id="conflicts-list" class="px-4 pb-3 space-y-2 hidden">
+                    </div>
+                </div>
+
+                <!-- 5. Session End -->
+                <div class="flex-none p-3 border-t border-white/5">
                     <button 
                         id="end-session-btn"
-                        class="text-gray-400 hover:text-red-400 transition-colors"
-                        title="セッション終了"
+                        class="w-full py-2 text-xs text-slate-500 hover:text-slate-300 hover:bg-surface-2 rounded-lg transition-colors"
                     >
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-                        </svg>
+                        セッション終了
                     </button>
                 </div>
-            </div>
-
-            <!-- Chat Messages -->
-            <div id="chat-messages" class="chat-container bg-white/5 backdrop-blur-lg rounded-2xl p-6 overflow-y-auto mb-4 space-y-4">
-                <!-- Messages will be inserted here -->
-            </div>
-
-            <!-- Input Form -->
-            <form id="chat-form" class="flex gap-3">
-                <input 
-                    type="text" 
-                    id="message-input"
-                    placeholder="メッセージを入力..."
-                    class="flex-1 px-4 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-                    autocomplete="off"
-                >
-                <button 
-                    type="submit"
-                    id="send-btn"
-                    class="px-6 py-3 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-colors duration-200"
-                >
-                    送信
-                </button>
-            </form>
-        </div>
-
-        <!-- Stats Footer -->
-        <div id="stats" class="hidden mt-4 text-center text-gray-500 text-sm">
-            <span>💎 保存した洞察: <span id="insights-count">0</span></span>
-            <span class="mx-3">|</span>
-            <span>📚 活用した知識: <span id="knowledge-count">0</span></span>
+            </aside>
         </div>
     </div>
 
     <script>
+        // =====================================================
+        // Simplex Noise for organic particle movement
+        // =====================================================
+        class SimplexNoise {
+            constructor() {
+                this.p = new Uint8Array(256);
+                for (let i = 0; i < 256; i++) this.p[i] = i;
+                for (let i = 255; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [this.p[i], this.p[j]] = [this.p[j], this.p[i]];
+                }
+                this.perm = new Uint8Array(512);
+                for (let i = 0; i < 512; i++) this.perm[i] = this.p[i & 255];
+            }
+            
+            noise3D(x, y, z) {
+                const F3 = 1/3, G3 = 1/6;
+                const s = (x + y + z) * F3;
+                const i = Math.floor(x + s), j = Math.floor(y + s), k = Math.floor(z + s);
+                const t = (i + j + k) * G3;
+                const X0 = i - t, Y0 = j - t, Z0 = k - t;
+                const x0 = x - X0, y0 = y - Y0, z0 = z - Z0;
+                
+                let i1, j1, k1, i2, j2, k2;
+                if (x0 >= y0) {
+                    if (y0 >= z0) { i1=1; j1=0; k1=0; i2=1; j2=1; k2=0; }
+                    else if (x0 >= z0) { i1=1; j1=0; k1=0; i2=1; j2=0; k2=1; }
+                    else { i1=0; j1=0; k1=1; i2=1; j2=0; k2=1; }
+                } else {
+                    if (y0 < z0) { i1=0; j1=0; k1=1; i2=0; j2=1; k2=1; }
+                    else if (x0 < z0) { i1=0; j1=1; k1=0; i2=0; j2=1; k2=1; }
+                    else { i1=0; j1=1; k1=0; i2=1; j2=1; k2=0; }
+                }
+                
+                const x1 = x0 - i1 + G3, y1 = y0 - j1 + G3, z1 = z0 - k1 + G3;
+                const x2 = x0 - i2 + 2*G3, y2 = y0 - j2 + 2*G3, z2 = z0 - k2 + 2*G3;
+                const x3 = x0 - 1 + 3*G3, y3 = y0 - 1 + 3*G3, z3 = z0 - 1 + 3*G3;
+                
+                const ii = i & 255, jj = j & 255, kk = k & 255;
+                const grad3 = [[1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],[1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1],[0,1,1],[0,-1,1],[0,1,-1],[0,-1,-1]];
+                
+                const dot = (g, x, y, z) => g[0]*x + g[1]*y + g[2]*z;
+                const gi0 = this.perm[ii + this.perm[jj + this.perm[kk]]] % 12;
+                const gi1 = this.perm[ii + i1 + this.perm[jj + j1 + this.perm[kk + k1]]] % 12;
+                const gi2 = this.perm[ii + i2 + this.perm[jj + j2 + this.perm[kk + k2]]] % 12;
+                const gi3 = this.perm[ii + 1 + this.perm[jj + 1 + this.perm[kk + 1]]] % 12;
+                
+                let n0 = 0, n1 = 0, n2 = 0, n3 = 0;
+                let t0 = 0.6 - x0*x0 - y0*y0 - z0*z0;
+                if (t0 > 0) { t0 *= t0; n0 = t0 * t0 * dot(grad3[gi0], x0, y0, z0); }
+                let t1 = 0.6 - x1*x1 - y1*y1 - z1*z1;
+                if (t1 > 0) { t1 *= t1; n1 = t1 * t1 * dot(grad3[gi1], x1, y1, z1); }
+                let t2 = 0.6 - x2*x2 - y2*y2 - z2*z2;
+                if (t2 > 0) { t2 *= t2; n2 = t2 * t2 * dot(grad3[gi2], x2, y2, z2); }
+                let t3 = 0.6 - x3*x3 - y3*y3 - z3*z3;
+                if (t3 > 0) { t3 *= t3; n3 = t3 * t3 * dot(grad3[gi3], x3, y3, z3); }
+                
+                return 32 * (n0 + n1 + n2 + n3);
+            }
+        }
+
+        // =====================================================
+        // Knowledge Map - Organic Particle Sphere
+        // =====================================================
+        class KnowledgeMap {
+            constructor(container) {
+                this.container = container;
+                this.particleCount = 6000;
+                this.radius = 80;
+                this.noise = new SimplexNoise();
+                this.time = 0;
+                this.flashTimer = 0;
+                this.flashColor = null;
+                
+                this.init();
+                this.animate();
+            }
+            
+            init() {
+                this.scene = new THREE.Scene();
+                
+                const rect = this.container.getBoundingClientRect();
+                this.camera = new THREE.PerspectiveCamera(50, rect.width / rect.height, 0.1, 1000);
+                this.camera.position.z = this.radius * 2.8;
+                
+                this.renderer = new THREE.WebGLRenderer({ 
+                    antialias: true, 
+                    alpha: true 
+                });
+                this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+                this.renderer.setClearColor(0x000000, 0);
+                this.renderer.setSize(rect.width, rect.height);
+                this.container.appendChild(this.renderer.domElement);
+                
+                this.createParticles();
+                
+                window.addEventListener('resize', () => this.handleResize());
+            }
+            
+            createParticles() {
+                const geometry = new THREE.BufferGeometry();
+                const positions = new Float32Array(this.particleCount * 3);
+                const basePositions = new Float32Array(this.particleCount * 3);
+                const colors = new Float32Array(this.particleCount * 3);
+                const phases = new Float32Array(this.particleCount);
+                const depths = new Float32Array(this.particleCount);
+                
+                for (let i = 0; i < this.particleCount; i++) {
+                    const theta = Math.random() * Math.PI * 2;
+                    const phi = Math.acos(2 * Math.random() - 1);
+                    
+                    // Mix of surface and volume particles
+                    let rNorm;
+                    if (Math.random() < 0.7) {
+                        rNorm = 0.8 + Math.random() * 0.2;
+                    } else {
+                        rNorm = Math.pow(Math.random(), 1/3) * 0.8;
+                    }
+                    
+                    const r = this.radius * rNorm;
+                    const depth = rNorm;
+                    
+                    const x = r * Math.sin(phi) * Math.cos(theta);
+                    const y = r * Math.cos(phi);
+                    const z = r * Math.sin(phi) * Math.sin(theta);
+                    
+                    positions[i * 3] = x;
+                    positions[i * 3 + 1] = y;
+                    positions[i * 3 + 2] = z;
+                    
+                    basePositions[i * 3] = x;
+                    basePositions[i * 3 + 1] = y;
+                    basePositions[i * 3 + 2] = z;
+                    
+                    depths[i] = depth;
+                    
+                    // Cyan-blue gradient
+                    const colorVariation = Math.random() * 0.2;
+                    const depthFade = 0.5 + depth * 0.5;
+                    colors[i * 3] = (0.2 + colorVariation * 0.3) * depthFade;
+                    colors[i * 3 + 1] = (0.5 + colorVariation) * depthFade;
+                    colors[i * 3 + 2] = (0.85 + Math.random() * 0.15) * depthFade;
+                    
+                    phases[i] = Math.random() * Math.PI * 2;
+                }
+                
+                geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                geometry.setAttribute('basePosition', new THREE.BufferAttribute(basePositions, 3));
+                geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+                geometry.setAttribute('phase', new THREE.BufferAttribute(phases, 1));
+                geometry.setAttribute('depth', new THREE.BufferAttribute(depths, 1));
+                
+                const material = new THREE.PointsMaterial({
+                    size: 1.5,
+                    vertexColors: true,
+                    transparent: true,
+                    opacity: 0.75,
+                    blending: THREE.AdditiveBlending,
+                    sizeAttenuation: true
+                });
+                
+                this.particles = new THREE.Points(geometry, material);
+                this.scene.add(this.particles);
+            }
+            
+            handleResize() {
+                const rect = this.container.getBoundingClientRect();
+                this.camera.aspect = rect.width / rect.height;
+                this.camera.updateProjectionMatrix();
+                this.renderer.setSize(rect.width, rect.height);
+            }
+            
+            // Event: Fact verified - flash green/gold
+            onFactVerified(count = 1) {
+                this.flashTimer = 2.0;
+                this.flashColor = [0.29, 0.87, 0.5]; // Green
+            }
+            
+            // Event: Conflict detected - flash red
+            onConflict() {
+                this.flashTimer = 2.5;
+                this.flashColor = [0.97, 0.27, 0.27]; // Red
+            }
+            
+            // Event: Relation added
+            onRelationAdded() {
+                this.flashTimer = 1.5;
+                this.flashColor = [0.4, 0.8, 1.0]; // Bright cyan
+            }
+            
+            lerp(a, b, t) { return a + (b - a) * t; }
+            
+            animate() {
+                requestAnimationFrame(() => this.animate());
+                
+                this.time += 0.006;
+                const geometry = this.particles.geometry;
+                const positions = geometry.attributes.position.array;
+                const basePositions = geometry.attributes.basePosition.array;
+                const colors = geometry.attributes.color.array;
+                const phases = geometry.attributes.phase.array;
+                const depths = geometry.attributes.depth.array;
+                
+                // Slow rotation
+                this.particles.rotation.y += 0.0004;
+                this.particles.rotation.x = Math.sin(this.time * 0.3) * 0.02;
+                
+                // Flash decay
+                if (this.flashTimer > 0) {
+                    this.flashTimer -= 0.016;
+                }
+                
+                // Wave parameters (subtle)
+                const waveSpeed = 0.1;
+                const waveAmount = 4;
+                const noiseScale = 0.008;
+                const noiseAmount = 6;
+                
+                for (let i = 0; i < this.particleCount; i++) {
+                    const i3 = i * 3;
+                    const phase = phases[i];
+                    const depth = depths[i];
+                    
+                    const bx = basePositions[i3];
+                    const by = basePositions[i3 + 1];
+                    const bz = basePositions[i3 + 2];
+                    
+                    const len = Math.sqrt(bx*bx + by*by + bz*bz) || 1;
+                    const nx = bx / len;
+                    const ny = by / len;
+                    const nz = bz / len;
+                    
+                    const depthFactor = 0.3 + depth * 0.7;
+                    
+                    // Organic wave displacement
+                    const wave1 = Math.sin(this.time * waveSpeed + phase + ny * 4) * waveAmount * 0.5 * depthFactor;
+                    const wave2 = Math.sin(this.time * waveSpeed * 0.7 + phase * 1.3 + nx * 3) * waveAmount * 0.3 * depthFactor;
+                    
+                    const noiseVal = this.noise.noise3D(
+                        nx * 2 + this.time * 0.2,
+                        ny * 2 + this.time * 0.15,
+                        nz * 2 + this.time * 0.18
+                    ) * noiseAmount * depthFactor;
+                    
+                    const displacement = wave1 + wave2 + noiseVal;
+                    const scale = 1 + displacement / this.radius;
+                    
+                    positions[i3] = bx * scale;
+                    positions[i3 + 1] = by * scale;
+                    positions[i3 + 2] = bz * scale;
+                    
+                    // Base color: cyan-blue
+                    let r = 0.2 + (i % 3) * 0.05;
+                    let g = 0.5 + depth * 0.2;
+                    let b = 0.85;
+                    
+                    // Depth brightness
+                    const depthBrightness = 0.5 + depth * 0.5;
+                    r *= depthBrightness;
+                    g *= depthBrightness;
+                    b *= depthBrightness;
+                    
+                    // Shimmer
+                    const shimmer = (displacement / (waveAmount + noiseAmount + 0.1)) * 0.2;
+                    r += shimmer * 0.3;
+                    g += shimmer * 0.5;
+                    b += shimmer * 0.7;
+                    
+                    // Flash effect
+                    if (this.flashTimer > 0 && this.flashColor) {
+                        const flashT = Math.pow(this.flashTimer / 2.5, 2) * 0.5;
+                        r = this.lerp(r, this.flashColor[0], flashT);
+                        g = this.lerp(g, this.flashColor[1], flashT);
+                        b = this.lerp(b, this.flashColor[2], flashT);
+                    }
+                    
+                    colors[i3] = Math.max(0, Math.min(1, r));
+                    colors[i3 + 1] = Math.max(0, Math.min(1, g));
+                    colors[i3 + 2] = Math.max(0, Math.min(1, b));
+                }
+                
+                geometry.attributes.position.needsUpdate = true;
+                geometry.attributes.color.needsUpdate = true;
+                
+                this.renderer.render(this.scene, this.camera);
+            }
+            
+            dispose() {
+                this.particles.geometry.dispose();
+                this.particles.material.dispose();
+                this.renderer.dispose();
+            }
+        }
+
+        // =====================================================
+        // Main Application
+        // =====================================================
+        marked.setOptions({ breaks: true, gfm: true });
+
         // State
         let sessionId = null;
-        let totalInsights = 0;
-        let totalKnowledge = 0;
+        let currentIntent = '';
+        let topics = [];
+        let facts = [];
+        let conflicts = [];
+        let knowledgeMap = null;
 
-        // DOM Elements
+        // DOM
         const startScreen = document.getElementById('start-screen');
         const chatScreen = document.getElementById('chat-screen');
         const startForm = document.getElementById('start-form');
         const chatForm = document.getElementById('chat-form');
-        const topicInput = document.getElementById('topic');
+        const intentInput = document.getElementById('intent-input');
         const messageInput = document.getElementById('message-input');
         const chatMessages = document.getElementById('chat-messages');
-        const sessionTopic = document.getElementById('session-topic');
-        const domainBadge = document.getElementById('domain-badge');
-        const endSessionBtn = document.getElementById('end-session-btn');
+        const currentIntentEl = document.getElementById('current-intent');
+        const topicChipsEl = document.getElementById('topic-chips');
+        const topicCoverageEl = document.getElementById('topic-coverage-list');
+        const factTableEl = document.getElementById('fact-table');
+        const factCountEl = document.getElementById('fact-count');
+        const sessionListEl = document.getElementById('session-list');
         const sendBtn = document.getElementById('send-btn');
-        const stats = document.getElementById('stats');
-        const insightsCount = document.getElementById('insights-count');
-        const knowledgeCount = document.getElementById('knowledge-count');
+        const endSessionBtn = document.getElementById('end-session-btn');
+        const headerStatus = document.getElementById('header-status');
+        const conflictsSection = document.getElementById('conflicts-section');
+        const conflictsToggle = document.getElementById('conflicts-toggle');
+        const conflictsList = document.getElementById('conflicts-list');
+        const conflictsCountBadge = document.getElementById('conflicts-count-badge');
+        
+        // Metrics
+        const metricCoverage = document.getElementById('metric-coverage');
+        const metricVerified = document.getElementById('metric-verified');
+        const metricConflicts = document.getElementById('metric-conflicts');
 
-        // API Base URL
         const API_BASE = window.location.origin;
+        const USER_ID = 'web-user';
+        
+        let isStarting = false;
+        let isSending = false;
 
-        // Domain emoji mapping
-        const domainEmoji = {
-            'daily_work': '💼',
-            'recipe': '🍳',
-            'postmortem': '🔍',
-            'creative': '🎨',
-            'general': '💭'
+        // Initialize Knowledge Map
+        requestAnimationFrame(() => {
+            const mapContainer = document.getElementById('knowledge-map-canvas');
+            if (mapContainer) {
+                knowledgeMap = new KnowledgeMap(mapContainer);
+            }
+        });
+
+        // Domain config (simplified)
+        const domainConfig = {
+            'daily_work': { emoji: '💼', label: '業務報告' },
+            'recipe': { emoji: '🍳', label: 'レシピ' },
+            'postmortem': { emoji: '🔍', label: '振り返り' },
+            'creative': { emoji: '🎨', label: '創作' },
+            'general': { emoji: '💭', label: '一般' }
         };
+
+        // Auto-resize textarea
+        messageInput.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = Math.min(this.scrollHeight, 160) + 'px';
+        });
+
+        // Enter to send
+        messageInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+                e.preventDefault();
+                chatForm.dispatchEvent(new Event('submit'));
+            }
+        });
+
+        // Load recent sessions
+        async function loadSessions() {
+            try {
+                const res = await fetch(`${API_BASE}/api/users/${USER_ID}/sessions?limit=10`);
+                if (!res.ok) return;
+                const sessions = await res.json();
+                renderSessionList(sessions);
+            } catch (e) {
+                console.error('Error loading sessions:', e);
+            }
+        }
+
+        function renderSessionList(sessions) {
+            if (!sessions || sessions.length === 0) {
+                sessionListEl.innerHTML = '<p class="text-xs text-slate-600 py-4 text-center">履歴がありません</p>';
+                return;
+            }
+            
+            sessionListEl.innerHTML = sessions.map(s => {
+                const config = domainConfig[s.domain] || domainConfig['general'];
+                const status = s.has_conflicts ? 'conflict' : (s.verified_count > 0 ? 'verified' : 'draft');
+                return `
+                    <div class="session-item p-2.5 rounded-lg hover:bg-surface-2 cursor-pointer transition-colors" data-id="${s.id}">
+                        <div class="flex items-center gap-2 mb-1">
+                            <span class="text-xs">${config.emoji}</span>
+                            <span class="text-sm text-white truncate flex-1">${escapeHtml(s.topic)}</span>
+                            <span class="w-1.5 h-1.5 rounded-full ${status === 'conflict' ? 'bg-conflict' : status === 'verified' ? 'bg-verified' : 'bg-pending'}"></span>
+                        </div>
+                        <div class="text-[10px] text-slate-500">${formatTimeAgo(s.updated_at)} · ${s.turn_count || 0}ターン</div>
+                    </div>
+                `;
+            }).join('');
+            
+            // Click handlers
+            sessionListEl.querySelectorAll('.session-item').forEach(el => {
+                el.addEventListener('click', () => resumeSession(el.dataset.id));
+            });
+        }
+
+        function formatTimeAgo(iso) {
+            const d = new Date(iso);
+            const now = new Date();
+            const diff = Math.floor((now - d) / 60000);
+            if (diff < 1) return 'たった今';
+            if (diff < 60) return `${diff}分前`;
+            if (diff < 1440) return `${Math.floor(diff / 60)}時間前`;
+            return `${Math.floor(diff / 1440)}日前`;
+        }
 
         // Start session
         startForm.addEventListener('submit', async (e) => {
             e.preventDefault();
-            const topic = topicInput.value.trim();
-            if (!topic) return;
-
+            const intent = intentInput.value.trim();
+            if (!intent || isStarting) return;
+            
+            isStarting = true;
+            updateStatus('開始中...');
+            
             try {
-                const response = await fetch(`${API_BASE}/api/sessions`, {
+                const res = await fetch(`${API_BASE}/api/sessions`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ topic, user_id: 'web-user' })
+                    body: JSON.stringify({ topic: intent, user_id: USER_ID })
                 });
-
-                if (!response.ok) throw new Error('Failed to start session');
-
-                const data = await response.json();
+                
+                if (!res.ok) throw new Error('Failed to start session');
+                
+                const data = await res.json();
                 sessionId = data.session_id;
-
+                currentIntent = intent;
+                
                 // Update UI
-                sessionTopic.textContent = topic;
+                currentIntentEl.textContent = intent;
                 startScreen.classList.add('hidden');
                 chatScreen.classList.remove('hidden');
-                stats.classList.remove('hidden');
-
-                // Add opening message
+                
                 addMessage(data.opening_message, 'assistant');
                 messageInput.focus();
-
-            } catch (error) {
-                console.error('Error starting session:', error);
-                alert('セッションの開始に失敗しました。サーバーが起動しているか確認してください。');
+                updateStatus('Collecting');
+                
+                if (data.prior_knowledge_count > 0) {
+                    showToast(`${data.prior_knowledge_count}件の過去の記録を発見`, 'info');
+                    if (knowledgeMap) knowledgeMap.onFactVerified(data.prior_knowledge_count);
+                }
+                
+            } catch (err) {
+                console.error('Error starting session:', err);
+                showToast('セッションの開始に失敗しました', 'error');
+            } finally {
+                isStarting = false;
             }
         });
+
+        // Resume session
+        async function resumeSession(id) {
+            if (isStarting) return;
+            isStarting = true;
+            updateStatus('読み込み中...');
+            
+            try {
+                const res = await fetch(`${API_BASE}/api/sessions/${id}/resume`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: USER_ID })
+                });
+                
+                if (!res.ok) throw new Error('Failed to resume');
+                
+                const data = await res.json();
+                sessionId = data.session_id;
+                currentIntent = data.topic;
+                
+                currentIntentEl.textContent = data.topic;
+                startScreen.classList.add('hidden');
+                chatScreen.classList.remove('hidden');
+                
+                addMessage(data.resume_message, 'assistant');
+                messageInput.focus();
+                updateStatus('Collecting');
+                
+                // Load prior insights
+                if (data.prior_insights?.length > 0) {
+                    data.prior_insights.forEach(insight => addFact(insight));
+                    updateMetrics();
+                }
+                
+            } catch (err) {
+                console.error('Error resuming session:', err);
+                showToast('セッションの再開に失敗しました', 'error');
+            } finally {
+                isStarting = false;
+            }
+        }
 
         // Send message
         chatForm.addEventListener('submit', async (e) => {
             e.preventDefault();
-            const message = messageInput.value.trim();
-            if (!message || !sessionId) return;
-
-            // Add user message
-            addMessage(message, 'user');
+            const msg = messageInput.value.trim();
+            if (!msg || !sessionId || isSending) return;
+            
+            isSending = true;
+            addMessage(msg, 'user');
             messageInput.value = '';
+            messageInput.style.height = 'auto';
             sendBtn.disabled = true;
-
-            // Show typing indicator
-            const typingId = showTypingIndicator();
-
+            updateStatus('処理中...');
+            
+            const typingId = showTyping();
+            
             try {
-                const response = await fetch(`${API_BASE}/api/sessions/${sessionId}/messages`, {
+                const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/messages`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message })
+                    body: JSON.stringify({ message: msg })
                 });
-
-                if (!response.ok) throw new Error('Failed to send message');
-
-                const data = await response.json();
-
-                // Remove typing indicator
-                removeTypingIndicator(typingId);
-
-                // Add assistant message
-                addMessage(data.response, 'assistant');
-
-                // Update domain badge
-                updateDomainBadge(data.domain);
-
-                // Update stats
-                totalInsights += data.insights_saved;
-                totalKnowledge += data.knowledge_used;
-                insightsCount.textContent = totalInsights;
-                knowledgeCount.textContent = totalKnowledge;
-
-                // Show insight notification
-                if (data.insights_saved > 0) {
-                    showNotification(`💎 ${data.insights_saved}件の洞察を記録しました`);
+                
+                if (!res.ok) throw new Error('API Error');
+                
+                const data = await res.json();
+                removeTyping(typingId);
+                
+                addMessage(data.response, 'assistant', data.knowledge_used > 0);
+                
+                // Handle insights
+                if (data.insights_saved > 0 && data.insights_detail) {
+                    data.insights_detail.forEach(i => addFact(i));
+                    if (knowledgeMap) knowledgeMap.onFactVerified(data.insights_saved);
+                    showToast(`${data.insights_saved}件の事実を記録`, 'success');
                 }
-
-            } catch (error) {
-                console.error('Error sending message:', error);
-                removeTypingIndicator(typingId);
-                addMessage('申し訳ありません、エラーが発生しました。', 'error');
+                
+                // Handle conflicts
+                if (data.consistency_issues?.length > 0) {
+                    data.consistency_issues.forEach(c => addConflict(c));
+                    if (knowledgeMap) knowledgeMap.onConflict();
+                }
+                
+                // Handle suggested questions
+                if (data.suggested_questions?.length > 0) {
+                    document.getElementById('next-question-hint').textContent = 
+                        '💡 ' + data.suggested_questions[0];
+                }
+                
+                updateMetrics();
+                updateStatus('Collecting');
+                
+            } catch (err) {
+                console.error('Error sending message:', err);
+                removeTyping(typingId);
+                showToast('送信に失敗しました', 'error');
             } finally {
+                isSending = false;
                 sendBtn.disabled = false;
                 messageInput.focus();
             }
@@ -268,55 +926,72 @@
         endSessionBtn.addEventListener('click', async () => {
             if (!sessionId) return;
             if (!confirm('セッションを終了しますか？')) return;
-
+            
+            updateStatus('要約生成中...');
+            
             try {
-                await fetch(`${API_BASE}/api/sessions/${sessionId}`, {
-                    method: 'DELETE'
+                const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/end`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
                 });
-            } catch (error) {
-                console.error('Error ending session:', error);
+                
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.summary) showSummaryModal(data.summary);
+                }
+                
+            } catch (err) {
+                console.error('Error ending session:', err);
             }
+            
+            resetSession();
+        });
 
-            // Reset UI
-            sessionId = null;
-            totalInsights = 0;
-            totalKnowledge = 0;
-            chatMessages.innerHTML = '';
-            topicInput.value = '';
-            startScreen.classList.remove('hidden');
-            chatScreen.classList.add('hidden');
-            stats.classList.add('hidden');
+        // Conflicts toggle
+        conflictsToggle?.addEventListener('click', () => {
+            conflictsList.classList.toggle('hidden');
         });
 
         // Helper functions
-        function addMessage(text, type) {
-            const messageDiv = document.createElement('div');
-            messageDiv.className = `message-enter flex ${type === 'user' ? 'justify-end' : 'justify-start'}`;
-
+        function addMessage(text, type, hasRef = false) {
+            const div = document.createElement('div');
+            div.className = `fade-up flex ${type === 'user' ? 'justify-end' : 'justify-start'}`;
+            
             const bubble = document.createElement('div');
             bubble.className = type === 'user' 
-                ? 'max-w-[80%] px-4 py-3 rounded-2xl bg-purple-600 text-white'
-                : type === 'error'
-                ? 'max-w-[80%] px-4 py-3 rounded-2xl bg-red-500/20 text-red-300'
-                : 'max-w-[80%] px-4 py-3 rounded-2xl bg-white/10 text-gray-100';
-
-            bubble.innerHTML = text.replace(/\n/g, '<br>');
-            messageDiv.appendChild(bubble);
-            chatMessages.appendChild(messageDiv);
+                ? 'max-w-[75%] px-4 py-2.5 rounded-2xl bg-accent text-surface-0 text-sm'
+                : 'max-w-[75%] px-4 py-2.5 rounded-2xl bg-surface-3 text-slate-200 text-sm prose-msg';
+            
+            if (type === 'user') {
+                bubble.textContent = text;
+            } else {
+                bubble.innerHTML = marked.parse(text);
+            }
+            
+            div.appendChild(bubble);
+            
+            if (type === 'assistant' && hasRef) {
+                const ref = document.createElement('div');
+                ref.className = 'text-[10px] text-slate-500 mt-1 ml-1';
+                ref.textContent = '📚 過去の記録を参照';
+                div.querySelector('div').after(ref);
+            }
+            
+            chatMessages.appendChild(div);
             chatMessages.scrollTop = chatMessages.scrollHeight;
         }
 
-        function showTypingIndicator() {
+        function showTyping() {
             const id = 'typing-' + Date.now();
             const div = document.createElement('div');
             div.id = id;
-            div.className = 'flex justify-start message-enter';
+            div.className = 'flex justify-start fade-up';
             div.innerHTML = `
-                <div class="px-4 py-3 rounded-2xl bg-white/10">
-                    <div class="typing-indicator flex gap-1">
-                        <span class="w-2 h-2 bg-gray-400 rounded-full"></span>
-                        <span class="w-2 h-2 bg-gray-400 rounded-full"></span>
-                        <span class="w-2 h-2 bg-gray-400 rounded-full"></span>
+                <div class="px-4 py-3 rounded-2xl bg-surface-3">
+                    <div class="flex gap-1">
+                        <span class="typing-dot w-1.5 h-1.5 bg-slate-400 rounded-full"></span>
+                        <span class="typing-dot w-1.5 h-1.5 bg-slate-400 rounded-full"></span>
+                        <span class="typing-dot w-1.5 h-1.5 bg-slate-400 rounded-full"></span>
                     </div>
                 </div>
             `;
@@ -325,23 +1000,162 @@
             return id;
         }
 
-        function removeTypingIndicator(id) {
-            const element = document.getElementById(id);
-            if (element) element.remove();
+        function removeTyping(id) {
+            document.getElementById(id)?.remove();
         }
 
-        function updateDomainBadge(domain) {
-            const emoji = domainEmoji[domain] || '💭';
-            domainBadge.textContent = `${emoji} ${domain}`;
+        function addFact(fact) {
+            facts.push(fact);
+            renderFacts();
         }
 
-        function showNotification(text) {
-            const notification = document.createElement('div');
-            notification.className = 'fixed bottom-4 right-4 px-4 py-2 bg-purple-600 text-white rounded-lg shadow-lg message-enter';
-            notification.textContent = text;
-            document.body.appendChild(notification);
-            setTimeout(() => notification.remove(), 3000);
+        function renderFacts() {
+            if (facts.length === 0) {
+                factTableEl.innerHTML = '<p class="text-xs text-slate-600 py-4 text-center">まだ記録がありません</p>';
+                factCountEl.textContent = '0 facts';
+                return;
+            }
+            
+            factCountEl.textContent = `${facts.length} facts`;
+            factTableEl.innerHTML = facts.map((f, i) => {
+                const status = f.verified ? 'verified' : 'pending';
+                return `
+                    <div class="fact-row p-2 rounded-lg border border-white/5">
+                        <div class="flex items-start gap-2">
+                            <span class="w-1.5 h-1.5 mt-1.5 rounded-full flex-none ${status === 'verified' ? 'bg-verified' : 'bg-pending'}"></span>
+                            <div class="flex-1 min-w-0">
+                                <p class="text-xs text-white leading-relaxed">${escapeHtml(f.object || f.content || '')}</p>
+                                <div class="flex items-center gap-2 mt-1">
+                                    <span class="text-[10px] text-slate-500">${escapeHtml(f.subject || '')}</span>
+                                    ${f.tags?.length > 0 ? f.tags.map(t => `<span class="text-[10px] bg-surface-3 px-1.5 py-0.5 rounded">${escapeHtml(t)}</span>`).join('') : ''}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
         }
+
+        function addConflict(conflict) {
+            conflicts.push(conflict);
+            renderConflicts();
+        }
+
+        function renderConflicts() {
+            if (conflicts.length === 0) {
+                conflictsSection.classList.add('hidden');
+                return;
+            }
+            
+            conflictsSection.classList.remove('hidden');
+            conflictsCountBadge.textContent = conflicts.length;
+            
+            conflictsList.innerHTML = conflicts.map((c, i) => `
+                <div class="bg-conflict/5 border border-conflict/20 rounded-lg p-3">
+                    <div class="text-xs text-white mb-2">${escapeHtml(c.title || c.subject || '矛盾')}</div>
+                    <div class="text-[10px] text-slate-400 mb-1">以前: ${escapeHtml(c.previous?.text || c.previous || '')}</div>
+                    <div class="text-[10px] text-slate-400 mb-2">今回: ${escapeHtml(c.current?.text || c.current || '')}</div>
+                    <div class="flex gap-1">
+                        <button class="px-2 py-1 bg-verified/20 text-verified text-[10px] rounded hover:bg-verified/30" onclick="resolveConflict(${i}, 'accept')">今回を採用</button>
+                        <button class="px-2 py-1 bg-surface-3 text-slate-300 text-[10px] rounded hover:bg-surface-4" onclick="resolveConflict(${i}, 'keep')">以前を維持</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        window.resolveConflict = function(index, action) {
+            conflicts.splice(index, 1);
+            renderConflicts();
+            updateMetrics();
+            showToast(action === 'accept' ? '今回の内容を採用しました' : '以前の内容を維持します', 'info');
+        };
+
+        function updateMetrics() {
+            const verified = facts.filter(f => f.verified).length;
+            const total = facts.length;
+            const coverage = total > 0 ? Math.round((verified / total) * 100) : 0;
+            
+            metricCoverage.textContent = coverage + '%';
+            metricVerified.textContent = verified;
+            metricConflicts.textContent = conflicts.length;
+        }
+
+        function updateStatus(text) {
+            headerStatus.textContent = text;
+        }
+
+        function showToast(msg, type = 'info') {
+            const toast = document.createElement('div');
+            const bg = type === 'success' ? 'bg-verified' : type === 'error' ? 'bg-conflict' : 'bg-surface-3';
+            toast.className = `fade-up px-4 py-2.5 ${bg} text-white text-sm rounded-lg shadow-lg pointer-events-auto`;
+            toast.textContent = msg;
+            document.getElementById('toast-container').appendChild(toast);
+            
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateY(-10px)';
+                toast.style.transition = 'all 0.2s';
+                setTimeout(() => toast.remove(), 200);
+            }, 3000);
+        }
+
+        function showSummaryModal(summary) {
+            const modal = document.createElement('div');
+            modal.className = 'fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4';
+            modal.innerHTML = `
+                <div class="bg-surface-2 rounded-xl p-6 max-w-md w-full border border-white/5">
+                    <h2 class="text-lg font-semibold text-white mb-4">📋 セッション要約</h2>
+                    <p class="text-sm text-slate-300 mb-4">${escapeHtml(summary.content || '')}</p>
+                    ${summary.key_points?.length > 0 ? `
+                        <div class="mb-4">
+                            <h3 class="text-xs text-slate-400 mb-2">重要なポイント</h3>
+                            <ul class="text-sm text-slate-300 space-y-1">
+                                ${summary.key_points.map(p => `<li>• ${escapeHtml(p)}</li>`).join('')}
+                            </ul>
+                        </div>
+                    ` : ''}
+                    <button class="w-full py-2 bg-accent text-surface-0 rounded-lg font-medium" onclick="this.closest('.fixed').remove()">閉じる</button>
+                </div>
+            `;
+            document.body.appendChild(modal);
+            modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+        }
+
+        function resetSession() {
+            sessionId = null;
+            currentIntent = '';
+            topics = [];
+            facts = [];
+            conflicts = [];
+            
+            chatMessages.innerHTML = '';
+            intentInput.value = '';
+            messageInput.value = '';
+            currentIntentEl.textContent = '—';
+            topicChipsEl.innerHTML = '<span class="text-xs text-slate-600">—</span>';
+            factTableEl.innerHTML = '<p class="text-xs text-slate-600 py-4 text-center">まだ記録がありません</p>';
+            factCountEl.textContent = '0 facts';
+            conflictsSection.classList.add('hidden');
+            
+            startScreen.classList.remove('hidden');
+            chatScreen.classList.add('hidden');
+            
+            updateMetrics();
+            updateStatus('待機中');
+            loadSessions();
+        }
+
+        function escapeHtml(str) {
+            return String(str || '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        // Initialize
+        loadSessions();
     </script>
 </body>
 </html>
