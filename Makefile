@@ -1,55 +1,56 @@
-PYTHON ?= python3.11
-VENV ?= .venv
+.PHONY: install dev lint test run clean help
 
-.PHONY: install test typecheck ci clean setup-indices prompt-eval report
+# Default Python version
+PYTHON ?= python3.11
+
+help:
+	@echo "EL Agent - Available commands:"
+	@echo ""
+	@echo "  make install    - Install dependencies with uv"
+	@echo "  make dev        - Install with dev dependencies"
+	@echo "  make lint       - Run linters (ruff, mypy)"
+	@echo "  make test       - Run tests"
+	@echo "  make run        - Run the API server"
+	@echo "  make clean      - Clean up cache files"
+	@echo "  make docker-up  - Start services with Docker Compose"
+	@echo "  make docker-down - Stop Docker services"
 
 install:
-	$(PYTHON) -m venv $(VENV)
-	. $(VENV)/bin/activate && pip install -U pip && \
-		pip install -r requirements.txt -r dev-requirements.txt
+	uv sync
+
+dev:
+	uv sync --all-extras
+
+lint:
+	uv run ruff check packages/
+	uv run ruff format --check packages/
+	uv run mypy packages/core/src/el_core packages/api/src/el_api --ignore-missing-imports
+
+format:
+	uv run ruff check --fix packages/
+	uv run ruff format packages/
 
 test:
-	. $(VENV)/bin/activate && python -m pytest -q
+	uv run pytest packages/ -v
 
-typecheck:
-	. $(VENV)/bin/activate && mypy agent
+run:
+	uv run el-api
 
-ci: test typecheck
+run-dev:
+	ENV=development uv run el-api
 
 clean:
-	rm -rf $(VENV) 
+	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+	find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
+	find . -type d -name ".mypy_cache" -exec rm -rf {} + 2>/dev/null || true
+	find . -type d -name ".ruff_cache" -exec rm -rf {} + 2>/dev/null || true
+	find . -type d -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
 
-setup-indices:
-	@if [ ! -x $(VENV)/bin/python ]; then \
-		$(PYTHON) -m venv $(VENV); \
-	fi; \
-	if ! $(VENV)/bin/python -c 'import sys; import pathlib; p=pathlib.Path("$(VENV)/lib"); print(p); exit(0 if sys.version_info[:2]==(3,11) else 1)'; then \
-		rm -rf $(VENV); \
-		$(PYTHON) -m venv $(VENV); \
-	fi; \
-	$(VENV)/bin/python -m pip install -U pip; \
-	$(VENV)/bin/python -m pip install qdrant-client==1.9.0 elasticsearch==8.13.0; \
-	ES_URL=$${ES_URL:-http://localhost:9200} QDRANT_URL=$${QDRANT_URL:-http://localhost:6333} $(VENV)/bin/python scripts/setup_indices.py
+docker-up:
+	docker compose up -d
 
-prompt-eval:
-	@if [ ! -x $(VENV)/bin/python ]; then \
-		$(PYTHON) -m venv $(VENV); \
-	fi; \
-	if ! $(VENV)/bin/python -c 'import sys; import pathlib; p=pathlib.Path("$(VENV)/lib"); print(p); exit(0 if sys.version_info[:2]==(3,11) else 1)'; then \
-		rm -rf $(VENV); \
-		$(PYTHON) -m venv $(VENV); \
-	fi; \
-	$(VENV)/bin/python -m pip install -U pip; \
-	$(VENV)/bin/python -m pip install -r requirements.txt; \
-	P=$${P:?Specify P=<prompt>}; C=$${C:?Specify C=<case path>}; \
-	$(VENV)/bin/python scripts/prompt_eval.py --prompt $$P --case $$C
+docker-down:
+	docker compose down
 
-report:
-	@if [ ! -x $(VENV)/bin/python ]; then \
-		$(PYTHON) -m venv $(VENV); \
-	fi; \
-	if ! $(VENV)/bin/python -c 'import sys; import pathlib; p=pathlib.Path("$(VENV)/lib"); print(p); exit(0 if sys.version_info[:2]==(3,11) else 1)'; then \
-		rm -rf $(VENV); \
-		$(PYTHON) -m venv $(VENV); \
-	fi; \
-	$(VENV)/bin/python scripts/score_aggregator.py
+docker-logs:
+	docker compose logs -f el-api

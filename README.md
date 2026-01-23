@@ -1,188 +1,157 @@
-## EL (Eager Learner) / 好奇心駆動インタビューエージェント
+# EL (Eager Learner) v2
 
-EL は、**Discord 上で動作する思考パートナーBot** と  
-**暗黙知抽出・VoI（情報価値）ベースのエージェント群** をまとめたリポジトリです。
+**好奇心駆動インタビューエージェント** - LLMネイティブな対話システム
 
-- 対話を通じてユーザーの考えを深掘りする Discord Bot「EL」
-- テキストから KG（知識グラフ）を抽出する FastAPI（`agent/`）
-- VoI/Slot/Strategist を備えた次世代エージェント基盤（`el-agent/`）
+ELは、GPT-5.2をベースにした共感的なインタビューエージェントです。
+ユーザーとの対話を通じて洞察を引き出し、知識グラフに保存します。
 
-詳細なアーキテクチャとロードマップは `docs/CURIOUS_AGENT_FINAL.md` を参照してください。
+## 特徴
 
----
+- 🧠 **LLMネイティブアーキテクチャ**: GPT-5.2のFunction Callingを活用
+- 💭 **共感的な対話**: 傾聴と深掘りを重視したインタビュースタイル
+- 🔍 **動的ドメイン認識**: 会話内容から自動的にドメインを判断
+- 📊 **知識グラフ統合**: Neo4jで洞察を永続化・検索
+- 🎨 **モダンなWeb UI**: リアルタイムチャットインターフェース
 
-## 1. まず試すなら：Discord Bot EL
+## アーキテクチャ
 
-### 1.1 必要環境
+```
+EL/
+├── packages/
+│   ├── core/                 # エージェントコア
+│   │   └── src/el_core/
+│   │       ├── agent.py      # メインエージェント
+│   │       ├── tools.py      # KG検索・保存ツール
+│   │       ├── prompts.py    # System Prompt
+│   │       ├── schemas.py    # Pydanticスキーマ
+│   │       ├── llm/          # LLMクライアント
+│   │       └── stores/       # KGストア
+│   │
+│   ├── api/                  # FastAPI バックエンド
+│   │   └── src/el_api/
+│   │       └── main.py       # APIエンドポイント
+│   │
+│   └── web/                  # Web UI
+│       └── index.html        # チャットインターフェース
+│
+├── pyproject.toml            # ワークスペース設定
+├── docker-compose.yml
+└── Makefile
+```
 
-- Python 3.11 推奨（3.8 以上で動作想定）
-- Discord Bot トークン
-- OpenAI API キー
+## クイックスタート
 
-### 1.2 セットアップ
+### 1. 環境設定
 
 ```bash
+# リポジトリをクローン
 git clone https://github.com/PROJECT-CHTND/EL.git
 cd EL
 
-pip install -r requirements.txt
+# 環境変数を設定
+cp env.example .env
+# .envを編集してOpenAI APIキーを設定
 ```
 
-ルートに `.env` を作成し、最低限の環境変数を設定します。
+### 2. 依存関係のインストール
 
 ```bash
-DISCORD_BOT_TOKEN="YOUR_DISCORD_BOT_TOKEN"
-OPENAI_API_KEY="YOUR_OPENAI_API_KEY"
-OPENAI_MODEL="gpt-4o"
+# uvを使用（推奨）
+make install
 
-# セッション永続化（SQLite）
-EL_SQLITE_PATH="./data/el_sessions.db"
-
-# トレース / WAL ログ
-EL_TRACE=1
-EL_TRACE_DIR="./logs/wal"
-
-# メトリクス公開ポート（Prometheus）
-METRICS_PORT=8000
+# または手動で
+pip install uv
+uv sync
 ```
 
-### 1.3 起動と使い方
+### 3. 起動
 
 ```bash
-python nani_bot.py
+# APIサーバーを起動
+make run
+
+# 開発モード（ホットリロード）
+make run-dev
 ```
 
-- コンソールに `🧠 EL has started!` が出れば起動成功
-- Discord の任意チャンネルで:
+### 4. ブラウザでアクセス
 
-```text
-!explore 最近感動したこと
+```
+http://localhost:8000
 ```
 
-Bot が専用スレッドを作成し、そのトピックに対して**日本語または英語で探求的な質問**を投げかけます。
+## API エンドポイント
 
-利用可能な主なコマンド:
+| Method | Path | 説明 |
+|--------|------|------|
+| `POST` | `/api/sessions` | 新しいセッションを開始 |
+| `POST` | `/api/sessions/{id}/messages` | メッセージを送信 |
+| `GET` | `/api/sessions/{id}` | セッション情報を取得 |
+| `DELETE` | `/api/sessions/{id}` | セッションを終了 |
+| `WS` | `/ws/{session_id}` | WebSocketリアルタイムチャット |
 
-- `!explore [トピック]`  
-  新しいセッションを開始（言語は自動判定）
-- `!reflect`  
-  これまでの対話から「主な発見」「深まった理解」「今後の問い」を要約
-- `!finish`  
-  対話ログ（Markdown）と RAG 用 JSONL を生成してスレッドに添付
+## Docker での起動
 
----
-
-## 2. API として使う：Implicit Knowledge Extraction Agent（`agent/`）
-
-テキストからエンティティ・リレーション・スロット候補を抽出する FastAPI アプリです。
-
-### 2.1 起動
+Neo4j知識グラフを含むフルスタックを起動：
 
 ```bash
-pip install -r requirements.txt
+# サービスを起動
+make docker-up
 
-uvicorn agent.api.main:app --reload
+# ログを確認
+make docker-logs
+
+# 停止
+make docker-down
 ```
 
-- OpenAPI: `http://localhost:8000/docs`
-- 主なエンドポイント:
+## 設定
 
-| Method | Path                | 説明                                          |
-|--------|---------------------|-----------------------------------------------|
-| POST   | `/extract`          | KG 抽出（Stage②）→ `KGPayload` を返す       |
-| POST   | `/stream_pipeline`  | Stage01–04 の進捗を SSE でストリーミング    |
-| POST   | `/kg/submit`        | KG 事実の登録                                 |
-| POST   | `/kg/approve`       | KG 事実の承認                                 |
-| GET    | `/metrics`          | Prometheus 形式のメトリクスを返却            |
+### 必須環境変数
 
-環境変数（例）:
+| 変数名 | 説明 |
+|--------|------|
+| `OPENAI_API_KEY` | OpenAI APIキー |
+
+### オプション環境変数
+
+| 変数名 | デフォルト | 説明 |
+|--------|-----------|------|
+| `OPENAI_MODEL` | `gpt-5.2` | 使用するモデル |
+| `PORT` | `8000` | APIサーバーポート |
+| `NEO4J_URI` | - | Neo4j接続URI |
+| `NEO4J_USER` | `neo4j` | Neo4jユーザー |
+| `NEO4J_PASSWORD` | - | Neo4jパスワード |
+| `LOG_LEVEL` | `INFO` | ログレベル |
+
+## 開発
 
 ```bash
-OPENAI_API_KEY="sk-..."
-NEO4J_URI="bolt://localhost:7687"
-NEO4J_USER="neo4j"
-NEO4J_PASSWORD="password"
-REDIS_URL="redis://localhost:6379"          # 任意
-EL_EVAL_WEIGHTS="/absolute/path/to/config/weights/weights.json"  # 任意
-EL_PROMPT_VARIANTS_DIR="/absolute/path/to/prompts"               # 任意
+# 開発用依存関係をインストール
+make dev
+
+# リンター実行
+make lint
+
+# フォーマット
+make format
+
+# テスト実行
+make test
 ```
 
----
+## ドメイン
 
-## 3. VoI/Slot ベースのエージェント基盤：`el-agent/`
+ELは以下のドメインを自動認識します：
 
-`el-agent/` 以下には、VoI（情報価値）と Slot/Strategist を用いた次世代エージェントのコア実装があります。
+| ドメイン | 例 |
+|---------|-----|
+| `daily_work` | 業務日報、タスク進捗 |
+| `recipe` | 料理、レシピ |
+| `postmortem` | 障害振り返り |
+| `creative` | 創作活動、アイデア |
+| `general` | その他一般 |
 
-- `core/strategist.py` : `ask/search/none` を選択する Strategist
-- `core/knowledge_integrator.py` : BM25 / ベクトル検索の統合
-- `monitoring/metrics.py` : Prometheus メトリクス
+## ライセンス
 
-詳細な起動方法は `el-agent/README.md` を参照してください（Poetry ベース）。
-
-### 3.1 VoI / 停止しきい値の設定（M2 準備）
-
-Strategist の VoI/停止しきい値は、環境変数で調整できます。
-
-- `EL_VOI_TAU_STOP`  
-  `ask/search/none` を切り替えるための停止しきい値（既定: `0.08`）
-
-```bash
-export EL_VOI_TAU_STOP=0.05  # しきい値を下げて、より積極的に質問を続ける
-```
-
----
-
-## 4. 可観測性とメトリクス
-
-- Discord Bot 起動時、`METRICS_PORT` で Prometheus 互換メトリクスを公開
-- `ops/prometheus.yml` / `ops/grafana/` により、ローカルで
-
-```bash
-docker compose up -d prometheus loki promtail grafana
-```
-
-を実行すると、Grafana の「EL Agent Overview」ダッシュボードから
-
-- Turn latency (p50/p90/p99)
-- Slot coverage
-- QCheck duplicate rate
-- WAL ログ（Loki）
-
-などを閲覧できます。
-
----
-
-## 5. テストとローカル CI
-
-### 5.1 pytest
-
-ルートのテストは pytest で実行できます。
-
-```bash
-python -m pytest -q
-```
-
-### 5.2 Makefile による簡易 CI
-
-```bash
-make install   # .venv 作成 + 依存インストール
-make ci        # pytest -q + mypy agent
-```
-
-Python バージョンを変えたい場合:
-
-```bash
-make PYTHON=python3.10 install
-```
-
----
-
-## 6. 参考ドキュメント
-
-- `docs/CURIOUS_AGENT_FINAL.md`  
-  好奇心駆動インタビューエージェントの最終設計書（M1〜M3・R4）
-- `docs/R4_RESEARCH_TRACK.md`  
-  研究トラック（方策最適化/VoI チューニング等）のメモ
-
-これらを読みつつ、まずは **「1. Discord Bot EL」** から動かしてみると、
-リポジトリ全体の目的と挙動をつかみやすくなります。
+MIT License
