@@ -1,0 +1,10 @@
+[project]
+name = "el-web"
+version = "2.0.0"
+description = "EL Web UI - Static web interface for the EL interview agent"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

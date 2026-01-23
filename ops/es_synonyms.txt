@@ -1,6 +1,0 @@
-# example synonyms (comma-separated terms are equivalent)
-ai, artificial intelligence
-nlp, natural language processing
-llm, large language model
-kb, knowledge base
-

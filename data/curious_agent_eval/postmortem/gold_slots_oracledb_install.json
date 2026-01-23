@@ -1,0 +1,63 @@
+{
+  "summary": "Oracle Database のインストールを進める際、環境設定や前提条件の不足により一部手順でエラーが発生した。本対応では Oracle Universal Installer の実行手順および前提設定を見直し、Oracle Database のインストールと構成が正常に完了する状態に修正した。",
+  "impact": {
+    "users": "Oracle Database を新規にインストールするシステム管理者",
+    "severity": "中",
+    "business_effect": "データベース環境構築に遅延が生じ、開発/テスト基盤の準備が遅れた"
+  },
+  "detection": {
+    "method": "インストーラー実行時のログメッセージおよび完了ステータスの確認",
+    "ttd": "約20分"
+  },
+  "timeline": [
+    {
+      "t": "10:00",
+      "action": "Oracle Software Delivery Cloud からインストールイメージをダウンロード",
+      "result": "指定したバージョンのインストールファイルが入手できた"
+    },
+    {
+      "t": "10:10",
+      "action": "Oracle ホームディレクトリを作成し、インストールイメージを展開",
+      "result": "Oracle ホームが作成され、インストールファイルが展開できた"
+    },
+    {
+      "t": "10:20",
+      "action": "Oracle Universal Installer（setup.exe / runInstaller）を実行",
+      "result": "構成ウィザードが起動した"
+    },
+    {
+      "t": "10:30",
+      "action": "構成オプションとデータベースエディションを指定しインストール実行",
+      "result": "前提条件が不足していたため一部チェックでエラー"
+    },
+    {
+      "t": "10:45",
+      "action": "前提条件の不足を修正し再度インストール実行",
+      "result": "インストールが正常に完了"
+    }
+  ],
+  "root_cause": "Oracle データベースインストールの前提条件や設定手順を最初に十分に確認/実行していなかったこと",
+  "contributing_factors": [
+    "OFA（Oracle Optimal Flexible Architecture）準拠ディレクトリの作成手順を省略した",
+    "インストール前の前提パッケージや環境変数設定を見落とした",
+    "Oracle Universal Installer のオプション選択の理解不足"
+  ],
+  "remediation": [
+    "OFA 推奨ディレクトリ構造で Oracle ホームを作成した",
+    "前提条件チェックを実行し必要な設定とパッケージを導入した",
+    "Oracle Universal Installer の指示に従いエディション選択とコンフィグを完了した"
+  ],
+  "CAPA": [
+    {
+      "owner": "DB インフラ担当",
+      "due": "2026-02-15",
+      "success": "インストール前チェックリストに前提条件と設定項目が明示され、全チェックがパスされる"
+    },
+    {
+      "owner": "チームリード",
+      "due": "2026-02-20",
+      "success": "Oracle Database インストール手順書を正式に社内標準として文書化する"
+    }
+  ],
+  "lessons": "Oracle Database のインストールでは、公式ドキュメントの前提条件と構成ウィザードの手順を丁寧に確認・実行することで、不要なエラーや遅延を防ぐことができる。"
+}

@@ -1,0 +1,33 @@
+[project]
+name = "el-workspace"
+version = "2.0.0"
+description = "EL (Eager Learner) - Curiosity-driven Interview Agent"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "el-core",
+    "el-api",
+    "el-eval",
+]
+
+[tool.uv.workspace]
+members = ["packages/core", "packages/api", "packages/eval"]
+
+[tool.uv.sources]
+el-core = { workspace = true }
+el-api = { workspace = true }
+el-eval = { workspace = true }
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
