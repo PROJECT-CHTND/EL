@@ -3,6 +3,8 @@
 from el_core.agent import ELAgent
 from el_core.schemas import (
     ConversationTurn,
+    DateType,
+    DocumentChunk,
     Insight,
     Message,
     Session,
@@ -12,6 +14,8 @@ __version__ = "2.0.0"
 __all__ = [
     "ELAgent",
     "ConversationTurn",
+    "DateType",
+    "DocumentChunk",
     "Insight",
     "Message",
     "Session",

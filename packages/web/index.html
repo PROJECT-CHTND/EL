@@ -285,7 +285,7 @@
             </main>
 
             <!-- ===== RIGHT PANE: Knowledge Studio ===== -->
-            <aside id="right-pane" class="border-l border-white/5 flex flex-col min-h-0 bg-surface-0">
+            <aside id="right-pane" class="border-l border-white/5 flex flex-col min-h-0 bg-surface-0 overflow-y-auto">
                 
                 <!-- 1. Knowledge Map + Metrics -->
                 <div class="flex-none p-4 border-b border-white/5">
@@ -310,7 +310,25 @@
                     </div>
                 </div>
 
-                <!-- 2. Topic Coverage -->
+                <!-- 2. Documents Upload (prominent position) -->
+                <div class="flex-none p-4 border-b border-white/5">
+                    <div class="flex items-center justify-between mb-2">
+                        <h3 class="text-xs font-medium text-blue-400 uppercase tracking-wider">📄 Documents</h3>
+                        <span id="documents-count-badge-top" class="text-[10px] text-slate-500">0 files</span>
+                    </div>
+                    <div 
+                        id="upload-dropzone-main"
+                        class="border-2 border-dashed border-white/10 rounded-lg p-3 text-center hover:border-blue-400/50 hover:bg-blue-400/5 transition-colors cursor-pointer mb-2"
+                    >
+                        <input type="file" id="file-input-main" class="hidden" accept=".pdf,.docx,.xlsx,.txt,.md,.json" multiple>
+                        <p class="text-xs text-slate-400">📁 ファイルをドロップまたはクリック</p>
+                        <p class="text-[10px] text-slate-600 mt-1">PDF, DOCX, XLSX, TXT, MD, JSON</p>
+                    </div>
+                    <div id="documents-list-main" class="space-y-2 max-h-48 overflow-y-auto"
+                    </div>
+                </div>
+
+                <!-- 3. Topic Coverage -->
                 <div class="flex-none p-4 border-b border-white/5">
                     <div class="flex items-center justify-between mb-2">
                         <h3 class="text-xs font-medium text-slate-400 uppercase tracking-wider">Topic Coverage</h3>
@@ -320,13 +338,13 @@
                     </div>
                 </div>
 
-                <!-- 3. Evidence Ledger (Fact Table) -->
-                <div class="flex-1 flex flex-col min-h-0 p-4">
+                <!-- 4. Evidence Ledger (Fact Table) - limited height to show sections below -->
+                <div class="flex-none p-4 max-h-48 overflow-hidden">
                     <div class="flex items-center justify-between mb-2">
                         <h3 class="text-xs font-medium text-slate-400 uppercase tracking-wider">Evidence Ledger</h3>
                         <span id="fact-count" class="text-[10px] text-slate-500">0 facts</span>
                     </div>
-                    <div id="fact-table" class="flex-1 overflow-y-auto space-y-1">
+                    <div id="fact-table" class="overflow-y-auto space-y-1 max-h-32">
                         <p class="text-xs text-slate-600 py-4 text-center">まだ記録がありません</p>
                     </div>
                 </div>
@@ -341,7 +359,43 @@
                     </div>
                 </div>
 
-                <!-- 5. Session End -->
+                <!-- 5. Knowledge Summary (collapsible) -->
+                <div id="knowledge-summary-section" class="flex-none border-t border-white/5">
+                    <button id="summary-toggle" class="w-full px-4 py-2.5 flex items-center justify-between text-left hover:bg-surface-2 transition-colors">
+                        <span class="text-xs font-medium text-purple-400">📊 Knowledge Summary</span>
+                        <span id="summary-status" class="text-[10px] text-slate-500">クリックで展開</span>
+                    </button>
+                    <div id="summary-panel" class="px-4 pb-3 space-y-2 hidden">
+                        <div id="knowledge-stats" class="grid grid-cols-3 gap-2 text-center mb-2">
+                            <div class="bg-surface-2 rounded p-1.5">
+                                <div id="stat-facts" class="text-sm font-semibold text-white">0</div>
+                                <div class="text-[9px] text-slate-500">Facts</div>
+                            </div>
+                            <div class="bg-surface-2 rounded p-1.5">
+                                <div id="stat-docs" class="text-sm font-semibold text-white">0</div>
+                                <div class="text-[9px] text-slate-500">Docs</div>
+                            </div>
+                            <div class="bg-surface-2 rounded p-1.5">
+                                <div id="stat-sessions" class="text-sm font-semibold text-white">0</div>
+                                <div class="text-[9px] text-slate-500">Sessions</div>
+                            </div>
+                        </div>
+                        <div id="top-topics" class="space-y-1">
+                            <p class="text-[10px] text-slate-500">Top Topics:</p>
+                            <div id="topics-list" class="flex flex-wrap gap-1">
+                                <span class="text-xs text-slate-600">-</span>
+                            </div>
+                        </div>
+                        <button 
+                            id="generate-summary-btn"
+                            class="w-full mt-2 py-1.5 text-xs bg-purple-600 hover:bg-purple-700 text-white rounded transition-colors"
+                        >
+                            🔍 サマリー生成
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 7. Session End -->
                 <div class="flex-none p-3 border-t border-white/5">
                     <button 
                         id="end-session-btn"
@@ -842,7 +896,22 @@
                 startScreen.classList.add('hidden');
                 chatScreen.classList.remove('hidden');
                 
-                addMessage(data.resume_message, 'assistant');
+                // Clear existing messages
+                chatMessages.innerHTML = '';
+                
+                // Restore conversation history
+                if (data.conversation_history?.length > 0) {
+                    data.conversation_history.forEach(msg => {
+                        addMessage(msg.content, msg.role);
+                    });
+                    showToast(`📜 ${data.conversation_history.length / 2}ターンの会話を復元しました`, 'info');
+                }
+                
+                // Show resume message if no history
+                if (!data.conversation_history?.length && data.resume_message) {
+                    addMessage(data.resume_message, 'assistant');
+                }
+                
                 messageInput.focus();
                 updateStatus('Collecting');
                 
@@ -902,6 +971,11 @@
                     if (knowledgeMap) knowledgeMap.onConflict();
                 }
                 
+                // Handle aggregation suggestion
+                if (data.aggregation_suggestion) {
+                    showAggregationSuggestion(data.aggregation_suggestion);
+                }
+                
                 // Handle suggested questions
                 if (data.suggested_questions?.length > 0) {
                     document.getElementById('next-question-hint').textContent = 
@@ -909,6 +983,7 @@
                 }
                 
                 updateMetrics();
+                loadKnowledgeStats(); // Update stats after each message
                 updateStatus('Collecting');
                 
             } catch (err) {
@@ -1050,17 +1125,38 @@
             conflictsSection.classList.remove('hidden');
             conflictsCountBadge.textContent = conflicts.length;
             
-            conflictsList.innerHTML = conflicts.map((c, i) => `
-                <div class="bg-conflict/5 border border-conflict/20 rounded-lg p-3">
-                    <div class="text-xs text-white mb-2">${escapeHtml(c.title || c.subject || '矛盾')}</div>
-                    <div class="text-[10px] text-slate-400 mb-1">以前: ${escapeHtml(c.previous?.text || c.previous || '')}</div>
-                    <div class="text-[10px] text-slate-400 mb-2">今回: ${escapeHtml(c.current?.text || c.current || '')}</div>
-                    <div class="flex gap-1">
-                        <button class="px-2 py-1 bg-verified/20 text-verified text-[10px] rounded hover:bg-verified/30" onclick="resolveConflict(${i}, 'accept')">今回を採用</button>
-                        <button class="px-2 py-1 bg-surface-3 text-slate-300 text-[10px] rounded hover:bg-surface-4" onclick="resolveConflict(${i}, 'keep')">以前を維持</button>
+            conflictsList.innerHTML = conflicts.map((c, i) => {
+                // Handle both snake_case (API) and camelCase field names
+                const prevText = c.previous_text || c.previousText || c.previous?.text || c.previous || '(不明)';
+                const currText = c.current_text || c.currentText || c.current?.text || c.current || '(不明)';
+                const title = c.title || c.subject || '情報の変更';
+                const kind = c.kind || 'change';
+                const kindLabel = kind === 'contradiction' ? '矛盾' : '変更';
+                const kindColor = kind === 'contradiction' ? 'text-conflict' : 'text-amber-400';
+                
+                return `
+                    <div class="bg-conflict/5 border border-conflict/20 rounded-lg p-3">
+                        <div class="flex items-center gap-2 mb-2">
+                            <span class="text-[10px] ${kindColor} bg-white/5 px-1.5 py-0.5 rounded">${kindLabel}</span>
+                            <span class="text-xs text-white flex-1">${escapeHtml(title)}</span>
+                        </div>
+                        <div class="space-y-1 mb-3">
+                            <div class="text-[10px]">
+                                <span class="text-slate-500">以前:</span>
+                                <span class="text-slate-300 ml-1">${escapeHtml(prevText)}</span>
+                            </div>
+                            <div class="text-[10px]">
+                                <span class="text-slate-500">今回:</span>
+                                <span class="text-white ml-1">${escapeHtml(currText)}</span>
+                            </div>
+                        </div>
+                        <div class="flex gap-1">
+                            <button class="px-2 py-1 bg-verified/20 text-verified text-[10px] rounded hover:bg-verified/30" onclick="resolveConflict(${i}, 'accept')">今回を採用</button>
+                            <button class="px-2 py-1 bg-surface-3 text-slate-300 text-[10px] rounded hover:bg-surface-4" onclick="resolveConflict(${i}, 'keep')">以前を維持</button>
+                        </div>
                     </div>
-                </div>
-            `).join('');
+                `;
+            }).join('');
         }
 
         window.resolveConflict = function(index, action) {
@@ -1154,8 +1250,370 @@
                 .replace(/'/g, '&#039;');
         }
 
+        // =====================================================
+        // Document Upload & Knowledge Summary
+        // =====================================================
+        
+        // Document upload area
+        const uploadDropzone = document.getElementById('upload-dropzone-main');
+        const fileInput = document.getElementById('file-input-main');
+        const documentsList = document.getElementById('documents-list-main');
+        const documentsCountBadge = document.getElementById('documents-count-badge-top');
+        
+        const summaryToggle = document.getElementById('summary-toggle');
+        const summaryPanel = document.getElementById('summary-panel');
+        const summaryStatus = document.getElementById('summary-status');
+        const generateSummaryBtn = document.getElementById('generate-summary-btn');
+        
+        let uploadedDocuments = [];
+        let knowledgeStats = { total_facts: 0, total_documents: 0, total_sessions: 0, topics: [], entities: [] };
+
+        // Toggle summary panel
+        summaryToggle?.addEventListener('click', () => {
+            summaryPanel.classList.toggle('hidden');
+            if (!summaryPanel.classList.contains('hidden')) {
+                loadKnowledgeStats();
+            }
+        });
+
+        // File input change
+        fileInput?.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                uploadFiles(e.target.files);
+            }
+        });
+
+        // Click on dropzone
+        uploadDropzone?.addEventListener('click', () => {
+            fileInput?.click();
+        });
+
+        // Drag and drop
+        uploadDropzone?.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadDropzone.classList.add('border-blue-400', 'bg-blue-400/10');
+        });
+
+        uploadDropzone?.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            uploadDropzone.classList.remove('border-blue-400', 'bg-blue-400/10');
+        });
+
+        uploadDropzone?.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadDropzone.classList.remove('border-blue-400', 'bg-blue-400/10');
+            if (e.dataTransfer.files.length > 0) {
+                uploadFiles(e.dataTransfer.files);
+            }
+        });
+
+        async function uploadFiles(files) {
+            for (const file of files) {
+                await uploadSingleFile(file);
+            }
+        }
+
+        async function uploadSingleFile(file) {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            // Show uploading status
+            showToast(`📤 ${file.name} をアップロード中...`, 'info');
+
+            try {
+                const response = await fetch(`${API_BASE}/api/documents/upload`, {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Upload failed: ${response.status}`);
+                }
+
+                const doc = await response.json();
+                showToast(`📄 ${file.name} をアップロードしました。LLMで分析を開始します...`, 'success');
+                
+                // Reload documents list (will auto-refresh while processing)
+                loadDocuments();
+            } catch (error) {
+                console.error('Upload error:', error);
+                showToast(`❌ ${file.name} のアップロードに失敗しました`, 'error');
+            }
+        }
+
+        async function loadDocuments() {
+            try {
+                const response = await fetch(`${API_BASE}/api/documents`);
+                if (!response.ok) return;
+                
+                const data = await response.json();
+                uploadedDocuments = data.documents || [];
+                
+                // Update badge
+                if (documentsCountBadge) documentsCountBadge.textContent = `${uploadedDocuments.length} files`;
+                
+                renderDocuments();
+            } catch (error) {
+                console.error('Failed to load documents:', error);
+            }
+        }
+
+        function renderDocuments() {
+            const emptyMessage = '<p class="text-[10px] text-slate-600 text-center py-2">ドキュメントがありません</p>';
+            
+            if (uploadedDocuments.length === 0) {
+                if (documentsList) documentsList.innerHTML = emptyMessage;
+                return;
+            }
+
+            const docHtml = uploadedDocuments.map(doc => {
+                const statusConfig = {
+                    'completed': { icon: '✅', color: 'text-verified', label: '完了' },
+                    'processing': { icon: '⏳', color: 'text-amber-400', label: '分析中...' },
+                    'uploading': { icon: '📤', color: 'text-blue-400', label: 'アップロード中' },
+                    'failed': { icon: '❌', color: 'text-conflict', label: 'エラー' },
+                };
+                const status = statusConfig[doc.status] || statusConfig['uploading'];
+                
+                // Build detail section for completed documents
+                let detailHtml = '';
+                if (doc.status === 'completed') {
+                    const parts = [];
+                    if (doc.extracted_facts_count > 0) {
+                        parts.push(`<span class="text-verified">${doc.extracted_facts_count} facts</span>`);
+                    }
+                    if (doc.topics?.length > 0) {
+                        parts.push(`<span class="text-blue-400">${doc.topics.slice(0, 2).join(', ')}</span>`);
+                    }
+                    if (doc.domain && doc.domain !== 'general') {
+                        parts.push(`<span class="text-purple-400">${doc.domain}</span>`);
+                    }
+                    detailHtml = parts.length > 0 
+                        ? `<p class="text-[10px] text-slate-500 mt-0.5">${parts.join(' · ')}</p>` 
+                        : '';
+                    
+                    // Show summary preview if available
+                    if (doc.extracted_summary) {
+                        const summaryPreview = doc.extracted_summary.length > 60 
+                            ? doc.extracted_summary.substring(0, 60) + '...' 
+                            : doc.extracted_summary;
+                        detailHtml += `<p class="text-[9px] text-slate-600 mt-1 italic">"${escapeHtml(summaryPreview)}"</p>`;
+                    }
+                } else if (doc.status === 'processing') {
+                    detailHtml = `<p class="text-[10px] text-amber-400/70 mt-0.5 animate-pulse">LLMで内容を分析しています...</p>`;
+                } else if (doc.status === 'failed') {
+                    const errorMsg = doc.error_message || '処理に失敗しました';
+                    detailHtml = `<p class="text-[10px] text-conflict/70 mt-0.5">${escapeHtml(errorMsg.substring(0, 50))}</p>`;
+                }
+                
+                return `
+                    <div class="p-2 bg-surface-2 rounded text-xs border border-white/5 hover:border-white/10 transition-colors">
+                        <div class="flex items-start gap-2">
+                            <span class="${status.color} text-sm">${status.icon}</span>
+                            <div class="flex-1 min-w-0">
+                                <div class="flex items-center justify-between gap-1">
+                                    <p class="text-white truncate font-medium">${escapeHtml(doc.filename)}</p>
+                                    <span class="text-[9px] ${status.color} whitespace-nowrap">${status.label}</span>
+                                </div>
+                                ${detailHtml}
+                            </div>
+                            <button onclick="deleteDocument('${doc.id}')" class="text-slate-500 hover:text-conflict text-xs ml-1 opacity-50 hover:opacity-100">×</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+            
+            if (documentsList) documentsList.innerHTML = docHtml;
+            
+            // Auto-refresh if any documents are still processing
+            const hasProcessing = uploadedDocuments.some(d => d.status === 'processing' || d.status === 'uploading');
+            if (hasProcessing) {
+                setTimeout(() => loadDocuments(), 3000); // Refresh every 3 seconds
+            }
+        }
+
+        window.deleteDocument = async function(docId) {
+            if (!confirm('このドキュメントを削除しますか？')) return;
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/documents/${docId}`, {
+                    method: 'DELETE',
+                });
+                
+                if (response.ok) {
+                    showToast('🗑️ ドキュメントを削除しました', 'info');
+                    loadDocuments();
+                }
+            } catch (error) {
+                console.error('Failed to delete document:', error);
+                showToast('❌ 削除に失敗しました', 'error');
+            }
+        };
+
+        async function loadKnowledgeStats() {
+            try {
+                const response = await fetch(`${API_BASE}/api/knowledge/stats`);
+                if (!response.ok) return;
+                
+                knowledgeStats = await response.json();
+                renderKnowledgeStats();
+            } catch (error) {
+                console.error('Failed to load knowledge stats:', error);
+            }
+        }
+
+        function renderKnowledgeStats() {
+            document.getElementById('stat-facts').textContent = knowledgeStats.total_facts || 0;
+            document.getElementById('stat-docs').textContent = knowledgeStats.total_documents || 0;
+            document.getElementById('stat-sessions').textContent = knowledgeStats.total_sessions || 0;
+
+            const topicsList = document.getElementById('topics-list');
+            if (knowledgeStats.topics?.length > 0) {
+                topicsList.innerHTML = knowledgeStats.topics.slice(0, 5).map(t => `
+                    <button 
+                        onclick="showTopicSummary('${escapeHtml(t.name)}')"
+                        class="px-2 py-0.5 bg-purple-500/20 text-purple-400 text-[10px] rounded hover:bg-purple-500/30"
+                    >
+                        ${escapeHtml(t.name)} (${t.fact_count})
+                    </button>
+                `).join('');
+            } else {
+                topicsList.innerHTML = '<span class="text-xs text-slate-600">-</span>';
+            }
+        }
+
+        generateSummaryBtn?.addEventListener('click', async () => {
+            // Show entity selection modal
+            if (knowledgeStats.entities?.length > 0) {
+                showEntitySelectionModal();
+            } else if (knowledgeStats.topics?.length > 0) {
+                showTopicSummary(knowledgeStats.topics[0].name);
+            } else {
+                showToast('まだ要約するデータがありません', 'info');
+            }
+        });
+
+        function showEntitySelectionModal() {
+            const modal = document.createElement('div');
+            modal.className = 'fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4';
+            
+            const entities = [...(knowledgeStats.topics || []), ...(knowledgeStats.entities || [])];
+            
+            modal.innerHTML = `
+                <div class="bg-surface-2 rounded-xl p-6 max-w-md w-full border border-white/5 max-h-[80vh] overflow-y-auto">
+                    <h2 class="text-lg font-semibold text-white mb-4">📊 サマリー生成</h2>
+                    <p class="text-sm text-slate-400 mb-4">要約するトピックまたはエンティティを選択</p>
+                    <div class="space-y-2 mb-4">
+                        ${entities.map(e => `
+                            <button 
+                                onclick="showTopicSummary('${escapeHtml(e.name)}'); this.closest('.fixed').remove();"
+                                class="w-full text-left px-4 py-2 bg-surface-3 hover:bg-surface-4 rounded-lg text-sm text-white flex justify-between items-center"
+                            >
+                                <span>${escapeHtml(e.name)}</span>
+                                <span class="text-xs text-slate-500">${e.fact_count} facts</span>
+                            </button>
+                        `).join('')}
+                    </div>
+                    <button class="w-full py-2 bg-surface-3 text-slate-300 rounded-lg text-sm" onclick="this.closest('.fixed').remove()">キャンセル</button>
+                </div>
+            `;
+            document.body.appendChild(modal);
+            modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+        }
+
+        window.showTopicSummary = async function(topic) {
+            showToast(`📊 ${topic} の要約を生成中...`, 'info');
+            
+            try {
+                // Try entity first, then topic
+                let response = await fetch(`${API_BASE}/api/knowledge/entities/${encodeURIComponent(topic)}/summarize`, {
+                    method: 'POST',
+                });
+                
+                if (!response.ok) {
+                    response = await fetch(`${API_BASE}/api/knowledge/topics/${encodeURIComponent(topic)}/summarize`, {
+                        method: 'POST',
+                    });
+                }
+                
+                if (!response.ok) {
+                    throw new Error('Failed to generate summary');
+                }
+                
+                const summary = await response.json();
+                showKnowledgeSummaryModal(summary);
+            } catch (error) {
+                console.error('Failed to generate summary:', error);
+                showToast('❌ サマリー生成に失敗しました', 'error');
+            }
+        };
+
+        function showAggregationSuggestion(suggestion) {
+            const existingSuggestion = document.getElementById('aggregation-toast');
+            if (existingSuggestion) existingSuggestion.remove();
+            
+            const toast = document.createElement('div');
+            toast.id = 'aggregation-toast';
+            toast.className = 'fixed bottom-24 right-4 bg-purple-600 text-white p-4 rounded-lg shadow-lg z-40 max-w-sm fade-up';
+            toast.innerHTML = `
+                <div class="flex items-start gap-3">
+                    <span class="text-2xl">📊</span>
+                    <div class="flex-1">
+                        <p class="text-sm font-medium mb-1">${escapeHtml(suggestion.message)}</p>
+                        <div class="flex gap-2 mt-2">
+                            <button onclick="showTopicSummary('${escapeHtml(suggestion.topic)}'); this.closest('#aggregation-toast').remove();" class="px-3 py-1 bg-white/20 hover:bg-white/30 rounded text-xs">サマリー生成</button>
+                            <button onclick="this.closest('#aggregation-toast').remove();" class="px-3 py-1 bg-white/10 hover:bg-white/20 rounded text-xs">後で</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(toast);
+            
+            // Auto-dismiss after 10 seconds
+            setTimeout(() => toast.remove(), 10000);
+        }
+
+        function showKnowledgeSummaryModal(summary) {
+            const modal = document.createElement('div');
+            modal.className = 'fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4';
+            modal.innerHTML = `
+                <div class="bg-surface-2 rounded-xl p-6 max-w-lg w-full border border-white/5 max-h-[80vh] overflow-y-auto">
+                    <h2 class="text-lg font-semibold text-white mb-2">📊 ${escapeHtml(summary.topic)}</h2>
+                    <p class="text-[10px] text-slate-500 mb-4">${summary.fact_count} facts · ${summary.time_range || ''}</p>
+                    
+                    <div class="bg-surface-3 rounded-lg p-4 mb-4">
+                        <p class="text-sm text-slate-300">${escapeHtml(summary.summary)}</p>
+                    </div>
+                    
+                    ${summary.key_points?.length > 0 ? `
+                        <div class="mb-4">
+                            <h3 class="text-xs text-slate-400 mb-2">重要なポイント</h3>
+                            <ul class="text-sm text-slate-300 space-y-1">
+                                ${summary.key_points.map(p => `<li class="flex items-start gap-2"><span class="text-purple-400">•</span>${escapeHtml(p)}</li>`).join('')}
+                            </ul>
+                        </div>
+                    ` : ''}
+                    
+                    ${summary.related_entities?.length > 0 ? `
+                        <div class="mb-4">
+                            <h3 class="text-xs text-slate-400 mb-2">関連エンティティ</h3>
+                            <div class="flex flex-wrap gap-1">
+                                ${summary.related_entities.map(e => `<span class="px-2 py-0.5 bg-surface-4 text-xs text-slate-300 rounded">${escapeHtml(e)}</span>`).join('')}
+                            </div>
+                        </div>
+                    ` : ''}
+                    
+                    <button class="w-full py-2 bg-accent text-surface-0 rounded-lg font-medium" onclick="this.closest('.fixed').remove()">閉じる</button>
+                </div>
+            `;
+            document.body.appendChild(modal);
+            modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+        }
+
         // Initialize
         loadSessions();
+        loadDocuments();
+        loadKnowledgeStats();
     </script>
 </body>
 </html>
