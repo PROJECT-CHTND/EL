@@ -13,11 +13,16 @@ from el_core.schemas import (
     ConsistencyIssue,
     ConsistencyIssueKind,
     ConversationTurn,
+    DateType,
+    DocumentChunk,
+    DocumentExtractionResult,
     Domain,
+    ExtractedFact,
     Insight,
     KnowledgeItem,
     Session,
     SessionSummary,
+    TopicSummary,
 )
 from el_core.stores.kg_store import KnowledgeGraphStore
 from el_core.tools import ALL_TOOLS, ToolExecutor
@@ -43,6 +48,240 @@ def detect_language(text: str) -> str:
         ):
             return "Japanese"
     return "English"
+
+
+def extract_dates_from_text(text: str) -> tuple[Any, Any]:
+    """Extract date references from text for search filtering.
+
+    Supports:
+    - Japanese relative dates: 今日, 昨日, 一昨日, 先週, 今週, etc.
+    - English relative dates: today, yesterday, last week, etc.
+    - Japanese date formats: 2024年5月1日, 5月1日, 5/1, 5月
+    - English date formats: May 1, 2024, May 1st, May 2024
+    - ISO format: 2024-05-01
+
+    Args:
+        text: Text to extract dates from.
+
+    Returns:
+        Tuple of (start_date, end_date) as datetime objects, or (None, None) if no dates found.
+    """
+    import re
+    from datetime import datetime, timedelta
+
+    now = datetime.now()
+    current_year = now.year
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # ===== RELATIVE DATES (Japanese) =====
+    # Check for relative date references first (highest priority)
+    text_lower = text.lower()
+    
+    # 一昨日 (day before yesterday)
+    if "一昨日" in text or "おととい" in text:
+        target = today - timedelta(days=2)
+        return target, target
+    
+    # 昨日 (yesterday)
+    if "昨日" in text or "きのう" in text:
+        target = today - timedelta(days=1)
+        return target, target
+    
+    # 今日 (today)
+    if "今日" in text or "きょう" in text or "本日" in text:
+        return today, today
+    
+    # 明日 (tomorrow)
+    if "明日" in text or "あした" in text or "あす" in text:
+        target = today + timedelta(days=1)
+        return target, target
+    
+    # 明後日 (day after tomorrow)
+    if "明後日" in text or "あさって" in text:
+        target = today + timedelta(days=2)
+        return target, target
+    
+    # 先週 (last week)
+    if "先週" in text:
+        # Last week: Monday to Sunday of the previous week
+        days_since_monday = today.weekday()
+        last_monday = today - timedelta(days=days_since_monday + 7)
+        last_sunday = last_monday + timedelta(days=6)
+        return last_monday, last_sunday
+    
+    # 今週 (this week)
+    if "今週" in text:
+        days_since_monday = today.weekday()
+        this_monday = today - timedelta(days=days_since_monday)
+        this_sunday = this_monday + timedelta(days=6)
+        return this_monday, this_sunday
+    
+    # 先月 (last month)
+    if "先月" in text:
+        first_of_this_month = today.replace(day=1)
+        last_of_last_month = first_of_this_month - timedelta(days=1)
+        first_of_last_month = last_of_last_month.replace(day=1)
+        return first_of_last_month, last_of_last_month
+    
+    # 今月 (this month)
+    if "今月" in text:
+        first_of_this_month = today.replace(day=1)
+        if today.month == 12:
+            last_of_this_month = today.replace(year=today.year + 1, month=1, day=1) - timedelta(days=1)
+        else:
+            last_of_this_month = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
+        return first_of_this_month, last_of_this_month
+    
+    # N日前 (N days ago)
+    n_days_ago_match = re.search(r"(\d+)日前", text)
+    if n_days_ago_match:
+        days = int(n_days_ago_match.group(1))
+        target = today - timedelta(days=days)
+        return target, target
+    
+    # N週間前 (N weeks ago)
+    n_weeks_ago_match = re.search(r"(\d+)週間前", text)
+    if n_weeks_ago_match:
+        weeks = int(n_weeks_ago_match.group(1))
+        target = today - timedelta(weeks=weeks)
+        return target, target
+    
+    # ===== RELATIVE DATES (English) =====
+    if "day before yesterday" in text_lower:
+        target = today - timedelta(days=2)
+        return target, target
+    
+    if "yesterday" in text_lower:
+        target = today - timedelta(days=1)
+        return target, target
+    
+    if "today" in text_lower:
+        return today, today
+    
+    if "tomorrow" in text_lower:
+        target = today + timedelta(days=1)
+        return target, target
+    
+    if "day after tomorrow" in text_lower:
+        target = today + timedelta(days=2)
+        return target, target
+    
+    if "last week" in text_lower:
+        days_since_monday = today.weekday()
+        last_monday = today - timedelta(days=days_since_monday + 7)
+        last_sunday = last_monday + timedelta(days=6)
+        return last_monday, last_sunday
+    
+    if "this week" in text_lower:
+        days_since_monday = today.weekday()
+        this_monday = today - timedelta(days=days_since_monday)
+        this_sunday = this_monday + timedelta(days=6)
+        return this_monday, this_sunday
+    
+    if "last month" in text_lower:
+        first_of_this_month = today.replace(day=1)
+        last_of_last_month = first_of_this_month - timedelta(days=1)
+        first_of_last_month = last_of_last_month.replace(day=1)
+        return first_of_last_month, last_of_last_month
+    
+    # N days ago
+    n_days_ago_en = re.search(r"(\d+)\s*days?\s*ago", text_lower)
+    if n_days_ago_en:
+        days = int(n_days_ago_en.group(1))
+        target = today - timedelta(days=days)
+        return target, target
+    
+    # ===== ABSOLUTE DATES =====
+    # Japanese date patterns
+    jp_full_date = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日", text)
+    jp_month_day = re.search(r"(\d{1,2})月(\d{1,2})日", text)
+    jp_month_only = re.search(r"(\d{1,2})月(?!日)", text)
+
+    # English date patterns
+    en_full_date = re.search(
+        r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s*(\d{4})",
+        text,
+        re.IGNORECASE,
+    )
+    en_month_day = re.search(
+        r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?",
+        text,
+        re.IGNORECASE,
+    )
+    en_month_only = re.search(
+        r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s*(\d{4})?",
+        text,
+        re.IGNORECASE,
+    )
+
+    # ISO format
+    iso_date = re.search(r"(\d{4})-(\d{2})-(\d{2})", text)
+
+    month_map = {
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    }
+
+    try:
+        # Try Japanese full date first
+        if jp_full_date:
+            year, month, day = int(jp_full_date.group(1)), int(jp_full_date.group(2)), int(jp_full_date.group(3))
+            date = datetime(year, month, day)
+            return date, date
+
+        # ISO format
+        if iso_date:
+            year, month, day = int(iso_date.group(1)), int(iso_date.group(2)), int(iso_date.group(3))
+            date = datetime(year, month, day)
+            return date, date
+
+        # English full date
+        if en_full_date:
+            month = month_map[en_full_date.group(1).lower()[:3]]
+            day = int(en_full_date.group(2))
+            year = int(en_full_date.group(3))
+            date = datetime(year, month, day)
+            return date, date
+
+        # Japanese month + day
+        if jp_month_day:
+            month, day = int(jp_month_day.group(1)), int(jp_month_day.group(2))
+            date = datetime(current_year, month, day)
+            return date, date
+
+        # English month + day
+        if en_month_day:
+            month = month_map[en_month_day.group(1).lower()[:3]]
+            day = int(en_month_day.group(2))
+            date = datetime(current_year, month, day)
+            return date, date
+
+        # Japanese month only - return range for the whole month
+        if jp_month_only:
+            month = int(jp_month_only.group(1))
+            start_date = datetime(current_year, month, 1)
+            # End of month
+            if month == 12:
+                end_date = datetime(current_year + 1, 1, 1) - timedelta(days=1)
+            else:
+                end_date = datetime(current_year, month + 1, 1) - timedelta(days=1)
+            return start_date, end_date
+
+        # English month only
+        if en_month_only:
+            month = month_map[en_month_only.group(1).lower()[:3]]
+            year = int(en_month_only.group(2)) if en_month_only.group(2) else current_year
+            start_date = datetime(year, month, 1)
+            if month == 12:
+                end_date = datetime(year + 1, 1, 1) - timedelta(days=1)
+            else:
+                end_date = datetime(year, month + 1, 1) - timedelta(days=1)
+            return start_date, end_date
+
+    except (ValueError, AttributeError):
+        pass
+
+    return None, None
 
 
 class ELAgent:
@@ -274,6 +513,30 @@ class ELAgent:
         Raises:
             ValueError: If session not found or user mismatch.
         """
+        # First check if session is already in memory (with conversation history)
+        existing_session = self._sessions.get(session_id)
+        if existing_session is not None and existing_session.user_id == user_id:
+            # Session is already loaded with conversation history
+            logger.info(f"Resuming session {session_id} from memory ({len(existing_session.turns)} turns)")
+            
+            # Generate resume message
+            lang = existing_session.language
+            if lang.lower() in ("english", "en"):
+                resume_msg = (
+                    f"Welcome back! We were discussing \"{existing_session.topic}\". "
+                    f"You have {len(existing_session.turns)} exchanges so far. "
+                    f"Let's continue!"
+                )
+            else:
+                resume_msg = (
+                    f"「{existing_session.topic}」の続きですね。\n"
+                    f"これまで{len(existing_session.turns)}ターンの会話がありました。\n"
+                    f"続けましょう！"
+                )
+            
+            return session_id, resume_msg, existing_session.prior_knowledge
+        
+        # Session not in memory, load from Neo4j
         if self._kg_store is None:
             raise ValueError("Knowledge graph store not available")
 
@@ -310,18 +573,18 @@ class ELAgent:
         # Store in active sessions
         self._sessions[session_id] = session
 
-        # Generate resume message
+        # Generate resume message (from Neo4j - no conversation history available)
         if detected_lang.lower() in ("english", "en"):
             resume_msg = (
                 f"Welcome back! We were discussing \"{metadata.topic}\". "
                 f"Last time we had {metadata.turn_count} exchanges and saved {metadata.insights_count} insights. "
-                f"Would you like to continue from where we left off?"
+                f"(Note: Conversation history was not persisted. Starting fresh but with your insights!)"
             )
         else:
             resume_msg = (
                 f"「{metadata.topic}」の続きですね。お帰りなさい！\n"
                 f"前回は{metadata.turn_count}ターンの会話で、{metadata.insights_count}件の洞察を記録しました。\n"
-                f"どこから続けましょうか？"
+                f"（※会話履歴は保存されていませんが、記録した事実は引き継いでいます）"
             )
 
         logger.info(f"Resumed session {session_id} for user {user_id}")
@@ -505,11 +768,61 @@ Example:
         pre_search_knowledge: list[KnowledgeItem] = []
         consistency_issues: list[ConsistencyIssue] = []
         consistency_context = ""
+        chunk_context = ""  # Phase 2: Context from document chunks
+        relevant_chunks: list[DocumentChunk] = []
         
         if self._kg_store:
             try:
-                # Search for related knowledge before LLM response
-                pre_search_knowledge = await self._kg_store.search(user_message, limit=5)
+                # Extract dates from user message for temporal filtering
+                start_date, end_date = extract_dates_from_text(user_message)
+                
+                if start_date or end_date:
+                    # User mentioned a date - search by date range first
+                    logger.info(f"Detected date reference: {start_date} to {end_date}")
+                    
+                    # Phase 2: Search for document chunks by date (for accurate original content)
+                    if start_date and end_date and start_date == end_date:
+                        # Exact date match
+                        relevant_chunks = await self._kg_store.get_chunks_by_date(start_date)
+                    elif start_date and end_date:
+                        # Date range
+                        relevant_chunks = await self._kg_store.get_chunks_by_date_range(start_date, end_date)
+                    elif start_date:
+                        relevant_chunks = await self._kg_store.get_chunks_by_date(start_date)
+                    
+                    if relevant_chunks:
+                        # Format chunk content as context for LLM
+                        chunk_context = self._format_chunk_context(relevant_chunks, session.language)
+                        logger.info(f"Found {len(relevant_chunks)} relevant chunks for date query")
+                        # IMPORTANT: When we have chunk original content, skip fact search
+                        # to avoid LLM mixing accurate chunk content with potentially inaccurate extracted facts
+                        logger.info("Skipping fact search - using chunk original content as authoritative source")
+                    else:
+                        # No chunks found, fall back to extracted facts
+                        date_filtered_knowledge = await self._kg_store.search_by_date_range(
+                            start_date=start_date,
+                            end_date=end_date,
+                            query=user_message,
+                            limit=5,
+                        )
+                        pre_search_knowledge.extend(date_filtered_knowledge)
+                
+                # Only do keyword search if we don't have chunk content
+                # Chunk original content is the authoritative source
+                if not relevant_chunks:
+                    keyword_knowledge = await self._kg_store.search(
+                        user_message,
+                        limit=5,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                    
+                    # Merge results, avoiding duplicates
+                    seen_ids = {k.id for k in pre_search_knowledge}
+                    for item in keyword_knowledge:
+                        if item.id not in seen_ids:
+                            pre_search_knowledge.append(item)
+                            seen_ids.add(item.id)
                 
                 if pre_search_knowledge:
                     # Check for consistency issues BEFORE generating response
@@ -533,6 +846,10 @@ Example:
         system_content = get_system_prompt(session.language)
         if session.prior_context:
             system_content += session.prior_context
+        
+        # Phase 2: Add chunk content as context (for accurate document reference)
+        if chunk_context:
+            system_content += chunk_context
         
         # Add consistency context if there are issues to address
         if consistency_context:
@@ -606,6 +923,65 @@ Example:
             detected_domain=detected_domain,
             consistency_issues=consistency_issues,
         )
+
+    def _format_chunk_context(
+        self,
+        chunks: list[DocumentChunk],
+        language: str,
+    ) -> str:
+        """Format document chunks as context for LLM.
+
+        Phase 2: Provides the original document content for accurate reference.
+
+        Args:
+            chunks: List of relevant document chunks.
+            language: Session language.
+
+        Returns:
+            Formatted context string to append to system prompt.
+        """
+        if not chunks:
+            return ""
+
+        if language.lower() in ("english", "en"):
+            context = "\n\n### 🔒 AUTHORITATIVE DOCUMENT CONTENT (Must Quote Exactly)\n"
+            context += "The following is the EXACT original content from the user's uploaded documents.\n"
+            context += "**CRITICAL RULES:**\n"
+            context += "1. Quote EXACTLY what is written - do not paraphrase or summarize\n"
+            context += "2. If document says 'カエル 前', say 'カエル 前' - NOT 'カエル（前/後）'\n"
+            context += "3. Do NOT add information that is not in the document\n"
+            context += "4. Do NOT guess or infer - only state what is explicitly written\n\n"
+        else:
+            context = "\n\n### 🔒 ドキュメント原文（正確に引用すること）\n"
+            context += "以下はユーザーがアップロードしたドキュメントの**原文そのまま**です。\n"
+            context += "**絶対に守るべきルール：**\n"
+            context += "1. 書かれている内容を**一字一句そのまま**引用すること\n"
+            context += "2. 例：ドキュメントに「カエル 前」とあれば「カエル 前」と回答 - 「カエル（前/後）」は❌\n"
+            context += "3. ドキュメントに書かれていない情報を追加しないこと\n"
+            context += "4. 推測や補完は絶対にしないこと - 明示的に書かれていることのみ回答\n\n"
+
+        for chunk in chunks:
+            # Add date header if available
+            if chunk.chunk_date:
+                date_str = chunk.chunk_date.strftime("%Y年%m月%d日") if language.lower() not in ("english", "en") else chunk.chunk_date.strftime("%Y-%m-%d")
+                context += f"---\n📅 {date_str}"
+                if chunk.heading:
+                    context += f" - {chunk.heading}"
+                context += "\n\n"
+            elif chunk.heading:
+                context += f"---\n📄 {chunk.heading}\n\n"
+            else:
+                context += "---\n\n"
+
+            # Add the original content (preserved exactly as uploaded)
+            context += "【原文ここから】\n"
+            context += chunk.content
+            context += "\n【原文ここまで】\n\n"
+
+        context += "---\n"
+        context += "上記の原文から、質問に該当する部分をそのまま引用して回答してください。\n"
+        
+        return context
 
     def _format_consistency_context(
         self,
@@ -930,3 +1306,296 @@ Change example:
         except Exception as e:
             logger.warning(f"Failed to detect consistency issues: {e}")
             return []
+
+    # ==================== Document Processing ====================
+
+    async def extract_from_document(
+        self,
+        content: str,
+        filename: str,
+        language: str = "Japanese",
+    ) -> DocumentExtractionResult:
+        """Extract structured information from document content using LLM.
+
+        Args:
+            content: The parsed text content of the document.
+            filename: Original filename for context.
+            language: Language for extraction prompts.
+
+        Returns:
+            DocumentExtractionResult with summary, facts, topics, entities.
+        """
+        # Note: Content should already be truncated by caller (process_document_background)
+        # This is a safety limit for direct calls - GPT-5.2 can handle 128k+ tokens
+        max_chars = 100000
+        if len(content) > max_chars:
+            # Keep start 20% + end 80% to prioritize recent content
+            start_chars = int(max_chars * 0.2)
+            end_chars = max_chars - start_chars - 100
+            content = (
+                content[:start_chars] 
+                + f"\n\n[... 中間 約{len(content) - start_chars - end_chars:,}文字省略 ...]\n\n" 
+                + content[-end_chars:]
+            )
+
+        if language.lower() in ("english", "en"):
+            system_prompt = """You are a document analyzer. Extract key information from the document, paying special attention to temporal (date/time) information.
+
+Output ONLY valid JSON with these fields:
+- summary: 2-3 sentence summary of the document
+- facts: Array of factual statements as objects with:
+  - subject: The subject entity
+  - predicate: The relationship/attribute
+  - object: The value/content
+  - source_context: Brief context from document (max 50 chars)
+  - event_date: Date when this event occurred (YYYY-MM-DD format, null if unknown)
+  - event_date_end: End date for date ranges (YYYY-MM-DD format, null if not a range)
+  - date_type: One of "exact", "approximate", "range", "unknown"
+- topics: Array of main topics/themes
+- entities: Array of mentioned people, organizations, projects, places
+- domain: One of "daily_work", "recipe", "postmortem", "creative", "general"
+
+IMPORTANT: Extract ALL date information carefully. For each fact:
+- If an exact date is mentioned (e.g., "May 1, 2024"), use date_type: "exact"
+- If approximate (e.g., "around May", "early 2024"), use date_type: "approximate"
+- If a range (e.g., "May 1-15"), use date_type: "range" and set event_date_end
+- If no date context, use date_type: "unknown"
+
+Example:
+{"summary":"Project status report showing 80% completion with deadline Feb 28, 2024.","facts":[{"subject":"Project A","predicate":"completion rate","object":"80%","source_context":"According to the report","event_date":"2024-01-15","event_date_end":null,"date_type":"exact"},{"subject":"Project A","predicate":"deadline","object":"Feb 28, 2024","source_context":"Confirmed in section 3","event_date":"2024-02-28","event_date_end":null,"date_type":"exact"}],"topics":["Project Management","Progress Report"],"entities":["Project A","Tanaka"],"domain":"daily_work"}"""
+        else:
+            system_prompt = """あなたはドキュメント分析者です。ドキュメントから重要な情報を抽出してください。特に日付・時間情報に注意を払ってください。
+
+以下のフィールドを持つ有効なJSONのみを出力してください：
+- summary: 2-3文のドキュメント要約
+- facts: 事実の配列（各項目は以下の形式）
+  - subject: 主語エンティティ
+  - predicate: 関係・属性
+  - object: 値・内容
+  - source_context: ドキュメントからの簡潔な文脈（最大50文字）
+  - event_date: イベントが発生した日付（YYYY-MM-DD形式、不明ならnull）
+  - event_date_end: 期間の終了日（YYYY-MM-DD形式、範囲でなければnull）
+  - date_type: "exact"（正確）, "approximate"（約）, "range"（期間）, "unknown"（不明）のいずれか
+- topics: 主なトピック・テーマの配列
+- entities: 言及された人物、組織、プロジェクト、場所の配列
+- domain: "daily_work", "recipe", "postmortem", "creative", "general" のいずれか
+
+重要：すべての日付情報を注意深く抽出してください：
+- 正確な日付がある場合（例：「2024年5月1日」）→ date_type: "exact"
+- 曖昧な日付の場合（例：「5月頃」「2024年初め」）→ date_type: "approximate"
+- 期間の場合（例：「5月1日〜15日」）→ date_type: "range"、event_date_endを設定
+- 日付の文脈がない場合 → date_type: "unknown"
+
+例:
+{"summary":"プロジェクト進捗レポート。完了率80%、締め切りは2024年2月28日。","facts":[{"subject":"プロジェクトA","predicate":"完了率","object":"80%","source_context":"レポートによると","event_date":"2024-01-15","event_date_end":null,"date_type":"exact"},{"subject":"プロジェクトA","predicate":"締め切り","object":"2024年2月28日","source_context":"セクション3で確認","event_date":"2024-02-28","event_date_end":null,"date_type":"exact"}],"topics":["プロジェクト管理","進捗報告"],"entities":["プロジェクトA","田中さん"],"domain":"daily_work"}"""
+
+        user_prompt = f"""ファイル名: {filename}
+
+【ドキュメント内容】
+{content}
+
+上記のドキュメントを分析し、JSON形式で情報を抽出してください。"""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        try:
+            import json
+            response = await self._llm.chat(messages=messages)  # type: ignore
+            result_content = response.content or "{}"
+
+            # Clean up response
+            result_content = result_content.strip()
+            if result_content.startswith("```"):
+                result_content = result_content.split("\n", 1)[-1]
+            if result_content.endswith("```"):
+                result_content = result_content.rsplit("```", 1)[0]
+            result_content = result_content.strip()
+
+            data = json.loads(result_content)
+
+            # Parse facts with date information
+            facts = []
+            for f in data.get("facts", []):
+                if isinstance(f, dict) and "subject" in f and "predicate" in f and "object" in f:
+                    # Parse event_date
+                    event_date = None
+                    if f.get("event_date"):
+                        try:
+                            from datetime import datetime
+                            event_date = datetime.strptime(f["event_date"], "%Y-%m-%d")
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    # Parse event_date_end
+                    event_date_end = None
+                    if f.get("event_date_end"):
+                        try:
+                            from datetime import datetime
+                            event_date_end = datetime.strptime(f["event_date_end"], "%Y-%m-%d")
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    # Parse date_type
+                    date_type_str = f.get("date_type", "unknown")
+                    try:
+                        date_type = DateType(date_type_str)
+                    except ValueError:
+                        date_type = DateType.UNKNOWN
+                    
+                    facts.append(ExtractedFact(
+                        subject=f["subject"],
+                        predicate=f["predicate"],
+                        object=f["object"],
+                        source_context=f.get("source_context", ""),
+                        event_date=event_date,
+                        event_date_end=event_date_end,
+                        date_type=date_type,
+                    ))
+
+            # Parse domain
+            domain_str = data.get("domain", "general")
+            try:
+                domain = Domain(domain_str)
+            except ValueError:
+                domain = Domain.GENERAL
+
+            result = DocumentExtractionResult(
+                summary=data.get("summary", "ドキュメントの要約"),
+                facts=facts,
+                topics=data.get("topics", []),
+                entities=data.get("entities", []),
+                domain=domain,
+            )
+
+            logger.info(f"Extracted {len(facts)} facts from document: {filename}")
+            return result
+
+        except Exception as e:
+            logger.warning(f"Failed to extract from document: {e}")
+            return DocumentExtractionResult(
+                summary=f"{filename} のドキュメント",
+                facts=[],
+                topics=[],
+                entities=[],
+                domain=Domain.GENERAL,
+            )
+
+    async def generate_topic_summary(
+        self,
+        topic: str,
+        facts: list[KnowledgeItem],
+        language: str = "Japanese",
+    ) -> TopicSummary:
+        """Generate a comprehensive summary for a topic based on accumulated facts.
+
+        Args:
+            topic: The topic/entity name.
+            facts: List of facts related to the topic.
+            language: Language for the summary.
+
+        Returns:
+            TopicSummary with comprehensive overview.
+        """
+        if not facts:
+            return TopicSummary(
+                topic=topic,
+                summary=f"{topic}に関する記録はまだありません。",
+                key_points=[],
+                related_entities=[],
+                fact_count=0,
+            )
+
+        # Format facts for LLM
+        facts_text = "\n".join([
+            f"- {f.subject}は{f.predicate}「{f.object}」({f.created_at.strftime('%Y-%m-%d')})"
+            for f in facts
+        ])
+
+        # Extract unique entities
+        all_entities = set()
+        for f in facts:
+            all_entities.add(f.subject)
+            all_entities.add(f.object)
+        all_entities.discard(topic)
+
+        # Get time range
+        dates = [f.created_at for f in facts]
+        time_range = f"{min(dates).strftime('%Y-%m-%d')} ～ {max(dates).strftime('%Y-%m-%d')}"
+
+        if language.lower() in ("english", "en"):
+            system_prompt = """You are a knowledge synthesizer. Create a comprehensive summary of the topic based on the facts provided.
+
+Output ONLY valid JSON with these fields:
+- summary: 3-5 sentence comprehensive overview
+- key_points: Array of the most important points (max 7)
+- insights: Array of insights or patterns you noticed
+- questions: Array of follow-up questions that might be useful
+
+Example:
+{"summary":"Project A has been progressing steadily...","key_points":["Deadline is Feb 28","80% complete","Tanaka leading"],"insights":["Progress accelerated in January","Risk of deadline slip"],"questions":["What are the remaining tasks?","Any blockers?"]}"""
+        else:
+            system_prompt = """あなたはナレッジ統合者です。提供された事実に基づいて、トピックの包括的な要約を作成してください。
+
+以下のフィールドを持つ有効なJSONのみを出力してください：
+- summary: 3-5文の包括的な概要
+- key_points: 最も重要なポイントの配列（最大7つ）
+- insights: 気づいたパターンや洞察の配列
+- questions: 有用と思われるフォローアップ質問の配列
+
+例:
+{"summary":"プロジェクトAは順調に進行しており...","key_points":["締め切りは2月28日","完了率80%","田中さんがリード"],"insights":["1月に進捗が加速","締め切り遅延のリスクあり"],"questions":["残りのタスクは何か？","ブロッカーはあるか？"]}"""
+
+        user_prompt = f"""トピック: {topic}
+関連する事実数: {len(facts)}
+期間: {time_range}
+
+【記録された事実】
+{facts_text}
+
+上記の事実を統合し、{topic}についての包括的な要約をJSON形式で作成してください。"""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        try:
+            import json
+            response = await self._llm.chat(messages=messages)  # type: ignore
+            result_content = response.content or "{}"
+
+            # Clean up response
+            result_content = result_content.strip()
+            if result_content.startswith("```"):
+                result_content = result_content.split("\n", 1)[-1]
+            if result_content.endswith("```"):
+                result_content = result_content.rsplit("```", 1)[0]
+            result_content = result_content.strip()
+
+            data = json.loads(result_content)
+
+            summary = TopicSummary(
+                topic=topic,
+                summary=data.get("summary", f"{topic}についての要約"),
+                key_points=data.get("key_points", []) + data.get("insights", []),
+                related_entities=list(all_entities)[:10],
+                fact_count=len(facts),
+                time_range=time_range,
+            )
+
+            logger.info(f"Generated summary for topic: {topic}")
+            return summary
+
+        except Exception as e:
+            logger.warning(f"Failed to generate topic summary: {e}")
+            return TopicSummary(
+                topic=topic,
+                summary=f"{topic}に関する{len(facts)}件の事実が記録されています。",
+                key_points=[f.object for f in facts[:5]],
+                related_entities=list(all_entities)[:10],
+                fact_count=len(facts),
+                time_range=time_range,
+            )

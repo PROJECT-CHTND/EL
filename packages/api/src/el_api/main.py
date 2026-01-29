@@ -12,13 +12,15 @@ from typing import Any
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, File, UploadFile, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from el_core import ELAgent
+from el_core.document_parser import DocumentParser, truncate_content, chunk_document
+from el_core.schemas import Document, DocumentChunk, DocumentStatus, TopicSummary, KnowledgeStats
 from el_core.llm.client import LLMClient
 from el_core.stores.kg_store import KnowledgeGraphStore
 
@@ -129,6 +131,14 @@ class ConsistencyIssueDetail(BaseModel):
     model_config = {"ser_json_always": True}
 
 
+class AggregationSuggestion(BaseModel):
+    """Suggestion to aggregate knowledge when threshold is exceeded."""
+    topic: str
+    fact_count: int
+    threshold: int
+    message: str
+
+
 class MessageResponse(BaseModel):
     response: str
     domain: str
@@ -139,6 +149,8 @@ class MessageResponse(BaseModel):
     knowledge_detail: list[KnowledgeDetail] = []
     # Consistency issues detected
     consistency_issues: list[ConsistencyIssueDetail] = []
+    # Aggregation suggestion (when threshold exceeded)
+    aggregation_suggestion: AggregationSuggestion | None = None
     
     model_config = {"ser_json_always": True}
 
@@ -194,6 +206,13 @@ class ResumeSessionRequest(BaseModel):
     user_id: str = "default"
 
 
+class ConversationMessage(BaseModel):
+    """A message in conversation history."""
+    role: str  # "user" or "assistant"
+    content: str
+    timestamp: str | None = None
+
+
 class ResumeSessionResponse(BaseModel):
     """Response when resuming a session."""
     session_id: str
@@ -201,6 +220,7 @@ class ResumeSessionResponse(BaseModel):
     domain: str
     resume_message: str
     prior_insights: list[InsightDetail] = []
+    conversation_history: list[ConversationMessage] = []
     turn_count: int = 0
     insights_count: int = 0
     
@@ -289,6 +309,25 @@ async def send_message(session_id: str, request: MessageRequest) -> MessageRespo
         for issue in response.consistency_issues
     ]
 
+    # Check for aggregation suggestion
+    aggregation_suggestion = None
+    AGGREGATION_THRESHOLD = 15  # Suggest aggregation when a topic has this many facts
+    
+    if kg_store and response.detected_domain.value != "general":
+        try:
+            topics = await kg_store.get_all_topics(limit=5)
+            for topic in topics:
+                if topic.fact_count >= AGGREGATION_THRESHOLD:
+                    aggregation_suggestion = AggregationSuggestion(
+                        topic=topic.name,
+                        fact_count=topic.fact_count,
+                        threshold=AGGREGATION_THRESHOLD,
+                        message=f"「{topic.name}」に{topic.fact_count}件の事実が蓄積されました。サマリー生成をお勧めします。",
+                    )
+                    break
+        except Exception as e:
+            logger.warning(f"Failed to check aggregation threshold: {e}")
+
     return MessageResponse(
         response=response.message,
         domain=response.detected_domain.value,
@@ -297,6 +336,7 @@ async def send_message(session_id: str, request: MessageRequest) -> MessageRespo
         insights_detail=insights_detail,
         knowledge_detail=knowledge_detail,
         consistency_issues=consistency_issues_detail,
+        aggregation_suggestion=aggregation_suggestion,
     )
 
 
@@ -402,6 +442,21 @@ async def resume_session(session_id: str, request: ResumeSessionRequest) -> Resu
             )
             for item in prior_insights
         ]
+        
+        # Build conversation history
+        conversation_history = []
+        if session:
+            for turn in session.turns:
+                conversation_history.append(ConversationMessage(
+                    role="user",
+                    content=turn.user_message,
+                    timestamp=turn.timestamp.isoformat() if hasattr(turn, 'timestamp') else None,
+                ))
+                conversation_history.append(ConversationMessage(
+                    role="assistant",
+                    content=turn.assistant_response,
+                    timestamp=turn.timestamp.isoformat() if hasattr(turn, 'timestamp') else None,
+                ))
 
         return ResumeSessionResponse(
             session_id=resumed_id,
@@ -409,6 +464,7 @@ async def resume_session(session_id: str, request: ResumeSessionRequest) -> Resu
             domain=session.domain.value if session else "general",
             resume_message=resume_message,
             prior_insights=insights_detail,
+            conversation_history=conversation_history,
             turn_count=len(session.turns) if session else 0,
             insights_count=len(prior_insights),
         )
@@ -597,15 +653,812 @@ async def resolve_consistency(fact_id: str, request: ResolveConsistencyRequest) 
         raise HTTPException(status_code=500, detail="Failed to resolve consistency issue")
 
 
+# ==================== Document Upload API ====================
+
+
+class DocumentResponse(BaseModel):
+    """Response model for document."""
+    id: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    status: str
+    extracted_summary: str = ""
+    extracted_facts_count: int = 0
+    topics: list[str] = []
+    entities: list[str] = []
+    domain: str = "general"
+    error_message: str | None = None
+    created_at: str
+    processed_at: str | None = None
+
+
+class DocumentListResponse(BaseModel):
+    """Response model for document list."""
+    documents: list[DocumentResponse]
+    total: int
+
+
+async def process_document_background(
+    document_id: str,
+    content: bytes,
+    filename: str,
+):
+    """Background task to process uploaded document.
+    
+    Phase 2: Documents are chunked by date (or paragraph if no dates found),
+    and each chunk is processed separately. Original content is preserved
+    for accurate reference.
+    """
+    import uuid
+    from datetime import datetime
+    from el_core.schemas import Insight, Domain
+    
+    if kg_store is None or agent is None:
+        logger.error("KG store or agent not available for document processing")
+        return
+
+    try:
+        # Update status to processing
+        await kg_store.update_document_status(document_id, DocumentStatus.PROCESSING)
+
+        # Parse document
+        parsed = DocumentParser.parse(content, filename)
+        original_length = len(parsed.content)
+        logger.info(f"Document {filename}: {original_length:,} chars, starting chunk processing")
+
+        # Chunk the document by date (Phase 2)
+        chunks = chunk_document(parsed, document_id)
+        logger.info(f"Document {filename}: split into {len(chunks)} chunks")
+        
+        # Save chunks to knowledge graph
+        await kg_store.save_chunks(chunks)
+        
+        # Process each chunk and extract facts
+        all_facts: list[dict] = []
+        all_topics: set[str] = set()
+        all_entities: set[str] = set()
+        detected_domain = Domain.GENERAL
+        summaries: list[str] = []
+        
+        for chunk in chunks:
+            # For small chunks, use content directly
+            # For large chunks, truncate (should rarely happen with date-based chunking)
+            chunk_content = truncate_content(chunk.content, max_chars=50000)
+            
+            try:
+                # Extract information from this chunk
+                extraction = await agent.extract_from_document(
+                    chunk_content, 
+                    f"{filename} (chunk {chunk.chunk_index + 1}/{len(chunks)})"
+                )
+                
+                # Save extracted facts and link to chunk
+                for fact in extraction.facts:
+                    # Use chunk's date if fact has no specific date
+                    event_date = fact.event_date or chunk.chunk_date
+                    
+                    insight = Insight(
+                        subject=fact.subject,
+                        predicate=fact.predicate,
+                        object=fact.object,
+                        confidence=fact.confidence,
+                        domain=extraction.domain,
+                        event_date=event_date,
+                        event_date_end=fact.event_date_end or chunk.chunk_date_end,
+                        date_type=fact.date_type,
+                    )
+                    fact_id = await kg_store.save_insight(insight)
+                    await kg_store.link_fact_to_document(fact_id, document_id)
+                    # Link insight to its source chunk for accurate reference
+                    await kg_store.link_insight_to_chunk(fact_id, chunk.id)
+                    all_facts.append({
+                        "subject": fact.subject,
+                        "predicate": fact.predicate,
+                        "object": fact.object,
+                    })
+                
+                # Aggregate topics and entities
+                all_topics.update(extraction.topics)
+                all_entities.update(extraction.entities)
+                
+                # Keep track of domain (use most common non-general domain)
+                if extraction.domain != Domain.GENERAL:
+                    detected_domain = extraction.domain
+                
+                if extraction.summary:
+                    summaries.append(extraction.summary)
+                    
+            except Exception as chunk_error:
+                logger.warning(f"Failed to process chunk {chunk.chunk_index} of {filename}: {chunk_error}")
+                continue
+        
+        # Generate overall summary
+        if summaries:
+            # If multiple chunks, combine summaries (or could use LLM to synthesize)
+            if len(summaries) == 1:
+                overall_summary = summaries[0]
+            else:
+                overall_summary = " ".join(summaries[:5])  # Limit to first 5 summaries
+        else:
+            overall_summary = f"ドキュメント '{filename}' から {len(all_facts)} 件のファクトを抽出しました。"
+
+        # Update document with extraction results
+        await kg_store.update_document_status(
+            document_id,
+            DocumentStatus.COMPLETED,
+            extraction_result={
+                "summary": overall_summary,
+                "facts_count": len(all_facts),
+                "topics": list(all_topics),
+                "entities": list(all_entities),
+                "domain": detected_domain.value,
+            },
+        )
+
+        logger.info(f"Document {document_id} processed: {len(chunks)} chunks, {len(all_facts)} facts extracted")
+
+    except Exception as e:
+        logger.error(f"Failed to process document {document_id}: {e}")
+        await kg_store.update_document_status(
+            document_id,
+            DocumentStatus.FAILED,
+            error_message=str(e),
+        )
+
+
+@app.post("/api/documents/upload", response_model=DocumentResponse)
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+):
+    """Upload and process a document."""
+    import uuid
+    from datetime import datetime
+
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    if agent is None:
+        raise HTTPException(status_code=503, detail="Agent not available")
+
+    # Validate file type
+    try:
+        doc_type = DocumentParser.detect_type(file.filename or "unknown", file.content_type)
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {file.filename}"
+        )
+
+    # Read file content
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+
+    # Create document record
+    document_id = str(uuid.uuid4())
+    document = Document(
+        id=document_id,
+        filename=file.filename or "unknown",
+        content_type=file.content_type or "application/octet-stream",
+        size_bytes=len(content),
+        status=DocumentStatus.UPLOADING,
+        raw_content_preview=content[:500].decode("utf-8", errors="replace") if content else "",
+    )
+
+    # Save document metadata
+    await kg_store.save_document(document)
+
+    # Start background processing
+    background_tasks.add_task(
+        process_document_background,
+        document_id,
+        content,
+        file.filename or "unknown",
+    )
+
+    return DocumentResponse(
+        id=document.id,
+        filename=document.filename,
+        content_type=document.content_type,
+        size_bytes=document.size_bytes,
+        status=document.status.value,
+        created_at=document.created_at.isoformat(),
+    )
+
+
+@app.get("/api/documents", response_model=DocumentListResponse)
+async def list_documents():
+    """List all uploaded documents."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        documents = await kg_store.get_documents()
+        return DocumentListResponse(
+            documents=[
+                DocumentResponse(
+                    id=d.id,
+                    filename=d.filename,
+                    content_type=d.content_type,
+                    size_bytes=d.size_bytes,
+                    status=d.status.value,
+                    extracted_summary=d.extracted_summary,
+                    extracted_facts_count=d.extracted_facts_count,
+                    topics=d.topics,
+                    entities=d.entities,
+                    domain=d.domain.value,
+                    error_message=d.error_message,
+                    created_at=d.created_at.isoformat(),
+                    processed_at=d.processed_at.isoformat() if d.processed_at else None,
+                )
+                for d in documents
+            ],
+            total=len(documents),
+        )
+    except Exception as e:
+        logger.error(f"Failed to list documents: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list documents")
+
+
+@app.get("/api/documents/{document_id}", response_model=DocumentResponse)
+async def get_document(document_id: str):
+    """Get document details."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        document = await kg_store.get_document(document_id)
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        return DocumentResponse(
+            id=document.id,
+            filename=document.filename,
+            content_type=document.content_type,
+            size_bytes=document.size_bytes,
+            status=document.status.value,
+            extracted_summary=document.extracted_summary,
+            extracted_facts_count=document.extracted_facts_count,
+            topics=document.topics,
+            entities=document.entities,
+            domain=document.domain.value,
+            error_message=document.error_message,
+            created_at=document.created_at.isoformat(),
+            processed_at=document.processed_at.isoformat() if document.processed_at else None,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get document: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get document")
+
+
+@app.delete("/api/documents/{document_id}")
+async def delete_document(document_id: str):
+    """Delete a document and its extracted facts."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        deleted = await kg_store.delete_document(document_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return {"status": "deleted", "document_id": document_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete document: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete document")
+
+
+# ==================== Document Chunk API (Phase 2) ====================
+
+
+class ChunkResponse(BaseModel):
+    """Response model for a document chunk."""
+    id: str
+    document_id: str
+    content: str
+    chunk_index: int
+    chunk_date: str | None = None
+    chunk_date_end: str | None = None
+    heading: str = ""
+    char_count: int = 0
+    created_at: str
+
+
+class ChunkListResponse(BaseModel):
+    """Response model for chunk list."""
+    chunks: list[ChunkResponse]
+    total: int
+
+
+class ChunkSearchRequest(BaseModel):
+    """Request model for chunk search."""
+    query: str | None = None
+    date: str | None = None  # Specific date (YYYY-MM-DD)
+    start_date: str | None = None  # Range start
+    end_date: str | None = None  # Range end
+    limit: int = 10
+
+
+@app.get("/api/documents/{document_id}/chunks", response_model=ChunkListResponse)
+async def get_document_chunks(document_id: str):
+    """Get all chunks for a document."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        chunks = await kg_store.get_chunks_by_document(document_id)
+        return ChunkListResponse(
+            chunks=[
+                ChunkResponse(
+                    id=c.id,
+                    document_id=c.document_id,
+                    content=c.content,
+                    chunk_index=c.chunk_index,
+                    chunk_date=c.chunk_date.isoformat() if c.chunk_date else None,
+                    chunk_date_end=c.chunk_date_end.isoformat() if c.chunk_date_end else None,
+                    heading=c.heading,
+                    char_count=c.char_count,
+                    created_at=c.created_at.isoformat(),
+                )
+                for c in chunks
+            ],
+            total=len(chunks),
+        )
+    except Exception as e:
+        logger.error(f"Failed to get document chunks: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get document chunks")
+
+
+@app.post("/api/chunks/search", response_model=ChunkListResponse)
+async def search_chunks(request: ChunkSearchRequest):
+    """Search document chunks by date or content.
+    
+    Phase 2: Returns original document content for accurate reference.
+    Supports:
+    - date: Exact date match (YYYY-MM-DD)
+    - start_date + end_date: Date range search
+    - query: Keyword search in content
+    """
+    from datetime import datetime
+    
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        chunks: list[DocumentChunk] = []
+        
+        # Date-based search
+        if request.date:
+            try:
+                target_date = datetime.fromisoformat(request.date)
+                chunks = await kg_store.get_chunks_by_date(target_date)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+        
+        elif request.start_date and request.end_date:
+            try:
+                start = datetime.fromisoformat(request.start_date)
+                end = datetime.fromisoformat(request.end_date)
+                chunks = await kg_store.get_chunks_by_date_range(start, end)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+        
+        # Keyword search
+        elif request.query:
+            chunks = await kg_store.search_chunks(request.query, limit=request.limit)
+        
+        else:
+            raise HTTPException(
+                status_code=400, 
+                detail="Provide either 'date', 'start_date+end_date', or 'query' for search."
+            )
+        
+        return ChunkListResponse(
+            chunks=[
+                ChunkResponse(
+                    id=c.id,
+                    document_id=c.document_id,
+                    content=c.content,
+                    chunk_index=c.chunk_index,
+                    chunk_date=c.chunk_date.isoformat() if c.chunk_date else None,
+                    chunk_date_end=c.chunk_date_end.isoformat() if c.chunk_date_end else None,
+                    heading=c.heading,
+                    char_count=c.char_count,
+                    created_at=c.created_at.isoformat(),
+                )
+                for c in chunks[:request.limit]
+            ],
+            total=len(chunks),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to search chunks: {e}")
+        raise HTTPException(status_code=500, detail="Failed to search chunks")
+
+
+@app.get("/api/chunks/{chunk_id}", response_model=ChunkResponse)
+async def get_chunk(chunk_id: str):
+    """Get a specific chunk by ID."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        chunk = await kg_store.get_chunk(chunk_id)
+        if not chunk:
+            raise HTTPException(status_code=404, detail="Chunk not found")
+        
+        return ChunkResponse(
+            id=chunk.id,
+            document_id=chunk.document_id,
+            content=chunk.content,
+            chunk_index=chunk.chunk_index,
+            chunk_date=chunk.chunk_date.isoformat() if chunk.chunk_date else None,
+            chunk_date_end=chunk.chunk_date_end.isoformat() if chunk.chunk_date_end else None,
+            heading=chunk.heading,
+            char_count=chunk.char_count,
+            created_at=chunk.created_at.isoformat(),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get chunk: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get chunk")
+
+
+# ==================== Knowledge Aggregation API ====================
+
+
+class TopicStatsResponse(BaseModel):
+    """Response model for topic statistics."""
+    name: str
+    fact_count: int
+    document_count: int
+    last_updated: str | None = None
+
+
+class TopicsListResponse(BaseModel):
+    """Response model for topics list."""
+    topics: list[TopicStatsResponse]
+    total: int
+
+
+class EntitiesListResponse(BaseModel):
+    """Response model for entities list."""
+    entities: list[TopicStatsResponse]
+    total: int
+
+
+class TopicSummaryResponse(BaseModel):
+    """Response model for topic summary."""
+    topic: str
+    summary: str
+    key_points: list[str]
+    related_entities: list[str]
+    fact_count: int
+    document_count: int = 0
+    time_range: str = ""
+    generated_at: str
+
+
+class KnowledgeStatsResponse(BaseModel):
+    """Response model for overall knowledge stats."""
+    total_facts: int
+    total_documents: int
+    total_sessions: int
+    topics: list[TopicStatsResponse]
+    entities: list[TopicStatsResponse]
+
+
+class KnowledgeSearchItem(BaseModel):
+    """A knowledge item in search results."""
+    id: str
+    subject: str
+    predicate: str
+    object: str
+    confidence: float
+    domain: str
+    created_at: str
+    event_date: str | None = None
+    event_date_end: str | None = None
+    date_type: str = "unknown"
+    status: str = "active"
+
+
+class KnowledgeSearchResponse(BaseModel):
+    """Response model for knowledge search."""
+    items: list[KnowledgeSearchItem]
+    total: int
+    query: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+
+
+@app.get("/api/knowledge/search", response_model=KnowledgeSearchResponse)
+async def search_knowledge(
+    query: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    domain: str | None = None,
+    limit: int = 20,
+):
+    """Search knowledge base with optional date filtering.
+    
+    Args:
+        query: Optional keyword search term.
+        start_date: Start date filter (YYYY-MM-DD format).
+        end_date: End date filter (YYYY-MM-DD format).
+        domain: Optional domain filter.
+        limit: Maximum number of results (default: 20).
+    
+    Returns:
+        List of matching knowledge items.
+    """
+    from datetime import datetime
+    from el_core.schemas import Domain as DomainEnum
+    
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+    
+    try:
+        # Parse dates
+        parsed_start = None
+        parsed_end = None
+        
+        if start_date:
+            try:
+                parsed_start = datetime.strptime(start_date, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid start_date format. Use YYYY-MM-DD.")
+        
+        if end_date:
+            try:
+                parsed_end = datetime.strptime(end_date, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid end_date format. Use YYYY-MM-DD.")
+        
+        # Parse domain
+        parsed_domain = None
+        if domain:
+            try:
+                parsed_domain = DomainEnum(domain)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid domain: {domain}")
+        
+        # Search with date filters
+        if parsed_start or parsed_end:
+            # Use date range search
+            items = await kg_store.search_by_date_range(
+                start_date=parsed_start,
+                end_date=parsed_end,
+                query=query,
+                domain=parsed_domain,
+                limit=limit,
+            )
+        elif query:
+            # Use keyword search
+            items = await kg_store.search(
+                query=query,
+                limit=limit,
+                domain=parsed_domain,
+                start_date=parsed_start,
+                end_date=parsed_end,
+            )
+        else:
+            # No query and no date filter - return recent facts
+            items = await kg_store.search_by_date_range(
+                start_date=None,
+                end_date=None,
+                query=None,
+                domain=parsed_domain,
+                limit=limit,
+            )
+        
+        return KnowledgeSearchResponse(
+            items=[
+                KnowledgeSearchItem(
+                    id=item.id,
+                    subject=item.subject,
+                    predicate=item.predicate,
+                    object=item.object,
+                    confidence=item.confidence,
+                    domain=item.domain.value,
+                    created_at=item.created_at.isoformat(),
+                    event_date=item.event_date.isoformat() if item.event_date else None,
+                    event_date_end=item.event_date_end.isoformat() if item.event_date_end else None,
+                    date_type=item.date_type.value,
+                    status=item.status.value,
+                )
+                for item in items
+            ],
+            total=len(items),
+            query=query,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to search knowledge: {e}")
+        raise HTTPException(status_code=500, detail="Failed to search knowledge")
+
+
+@app.get("/api/knowledge/stats", response_model=KnowledgeStatsResponse)
+async def get_knowledge_stats():
+    """Get overall knowledge base statistics."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        stats = await kg_store.get_knowledge_stats()
+        return KnowledgeStatsResponse(
+            total_facts=stats.total_facts,
+            total_documents=stats.total_documents,
+            total_sessions=stats.total_sessions,
+            topics=[
+                TopicStatsResponse(
+                    name=t.name,
+                    fact_count=t.fact_count,
+                    document_count=t.document_count,
+                    last_updated=t.last_updated.isoformat() if t.last_updated else None,
+                )
+                for t in stats.topics
+            ],
+            entities=[
+                TopicStatsResponse(
+                    name=e.name,
+                    fact_count=e.fact_count,
+                    document_count=e.document_count,
+                    last_updated=e.last_updated.isoformat() if e.last_updated else None,
+                )
+                for e in stats.entities
+            ],
+        )
+    except Exception as e:
+        logger.error(f"Failed to get knowledge stats: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get knowledge stats")
+
+
+@app.get("/api/knowledge/topics", response_model=TopicsListResponse)
+async def list_topics():
+    """List all topics with statistics."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        topics = await kg_store.get_all_topics()
+        return TopicsListResponse(
+            topics=[
+                TopicStatsResponse(
+                    name=t.name,
+                    fact_count=t.fact_count,
+                    document_count=t.document_count,
+                    last_updated=t.last_updated.isoformat() if t.last_updated else None,
+                )
+                for t in topics
+            ],
+            total=len(topics),
+        )
+    except Exception as e:
+        logger.error(f"Failed to list topics: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list topics")
+
+
+@app.get("/api/knowledge/entities", response_model=EntitiesListResponse)
+async def list_entities():
+    """List all entities with statistics."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        entities = await kg_store.get_all_entities()
+        return EntitiesListResponse(
+            entities=[
+                TopicStatsResponse(
+                    name=e.name,
+                    fact_count=e.fact_count,
+                    document_count=e.document_count,
+                    last_updated=e.last_updated.isoformat() if e.last_updated else None,
+                )
+                for e in entities
+            ],
+            total=len(entities),
+        )
+    except Exception as e:
+        logger.error(f"Failed to list entities: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list entities")
+
+
+@app.post("/api/knowledge/topics/{topic}/summarize", response_model=TopicSummaryResponse)
+async def summarize_topic(topic: str):
+    """Generate a comprehensive summary for a topic."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    if agent is None:
+        raise HTTPException(status_code=503, detail="Agent not available")
+
+    try:
+        # Get all facts for this topic
+        facts = await kg_store.get_facts_by_topic(topic)
+        
+        # If no facts by domain, try by entity
+        if not facts:
+            facts = await kg_store.get_facts_by_entity(topic)
+
+        # Generate summary using agent
+        summary = await agent.generate_topic_summary(topic, facts)
+
+        return TopicSummaryResponse(
+            topic=summary.topic,
+            summary=summary.summary,
+            key_points=summary.key_points,
+            related_entities=summary.related_entities,
+            fact_count=summary.fact_count,
+            time_range=summary.time_range,
+            generated_at=summary.generated_at.isoformat(),
+        )
+    except Exception as e:
+        logger.error(f"Failed to summarize topic: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate topic summary")
+
+
+@app.post("/api/knowledge/entities/{entity}/summarize", response_model=TopicSummaryResponse)
+async def summarize_entity(entity: str):
+    """Generate a comprehensive summary for an entity."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    if agent is None:
+        raise HTTPException(status_code=503, detail="Agent not available")
+
+    try:
+        # Get all facts for this entity
+        facts = await kg_store.get_facts_by_entity(entity)
+
+        # Generate summary using agent
+        summary = await agent.generate_topic_summary(entity, facts)
+
+        return TopicSummaryResponse(
+            topic=summary.topic,
+            summary=summary.summary,
+            key_points=summary.key_points,
+            related_entities=summary.related_entities,
+            fact_count=summary.fact_count,
+            time_range=summary.time_range,
+            generated_at=summary.generated_at.isoformat(),
+        )
+    except Exception as e:
+        logger.error(f"Failed to summarize entity: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate entity summary")
+
+
 # Serve static files (Web UI)
 WEB_DIR = Path(__file__).parent.parent.parent.parent / "web"
+logger.info(f"WEB_DIR resolved to: {WEB_DIR}")
+logger.info(f"WEB_DIR exists: {WEB_DIR.exists()}")
 if WEB_DIR.exists():
+    index_file = WEB_DIR / "index.html"
+    logger.info(f"Index file: {index_file}, exists: {index_file.exists()}")
+    
+    # Check if Documents section exists in the file
+    if index_file.exists():
+        content = index_file.read_text()
+        has_documents = "upload-dropzone-main" in content
+        logger.info(f"Index file has Documents section: {has_documents}")
+    
     app.mount("/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
 
     @app.get("/")
     async def serve_index():
         """Serve the main HTML page."""
-        return FileResponse(WEB_DIR / "index.html")
+        return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 def run():

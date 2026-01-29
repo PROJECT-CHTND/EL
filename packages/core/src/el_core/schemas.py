@@ -27,6 +27,15 @@ class Role(str, Enum):
     SYSTEM = "system"
 
 
+class DateType(str, Enum):
+    """Type of date information."""
+
+    EXACT = "exact"  # Exact date (e.g., 2024-05-01)
+    APPROXIMATE = "approximate"  # Approximate date (e.g., around May)
+    RANGE = "range"  # Date range (e.g., May 1 - May 15)
+    UNKNOWN = "unknown"  # No date information
+
+
 class Message(BaseModel):
     """A single message in the conversation."""
 
@@ -46,6 +55,10 @@ class Insight(BaseModel):
     confidence: float = Field(default=0.8, ge=0.0, le=1.0, description="Confidence score")
     domain: Domain = Field(default=Domain.GENERAL, description="Detected domain")
     timestamp: datetime = Field(default_factory=datetime.now)
+    # Temporal information
+    event_date: datetime | None = Field(default=None, description="Date when the event occurred")
+    event_date_end: datetime | None = Field(default=None, description="End date for date ranges")
+    date_type: DateType = Field(default=DateType.UNKNOWN, description="Type of date information")
 
     model_config = {"frozen": True}
 
@@ -69,6 +82,10 @@ class KnowledgeItem(BaseModel):
     domain: Domain
     created_at: datetime
     status: FactStatus = FactStatus.ACTIVE
+    # Temporal information
+    event_date: datetime | None = None
+    event_date_end: datetime | None = None
+    date_type: DateType = DateType.UNKNOWN
 
     model_config = {"frozen": True}
 
@@ -256,4 +273,133 @@ class AgentResponse(BaseModel):
         description="Detected consistency issues with past knowledge"
     )
 
+    model_config = {"ser_json_always": True}
+
+
+# Document and Knowledge Aggregation schemas
+
+
+class DocumentStatus(str, Enum):
+    """Status of document processing."""
+
+    UPLOADING = "uploading"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class Document(BaseModel):
+    """An uploaded document with extracted knowledge."""
+
+    id: str = Field(..., description="Document ID")
+    filename: str = Field(..., description="Original filename")
+    content_type: str = Field(..., description="MIME type")
+    size_bytes: int = Field(..., description="File size in bytes")
+    
+    # Extracted content
+    extracted_summary: str = Field(default="", description="LLM-generated summary")
+    extracted_facts_count: int = Field(default=0, description="Number of facts extracted")
+    raw_content_preview: str = Field(default="", description="First 500 chars of raw content")
+    
+    # Categorization
+    topics: list[str] = Field(default_factory=list, description="Detected topics")
+    entities: list[str] = Field(default_factory=list, description="Mentioned entities")
+    domain: Domain = Field(default=Domain.GENERAL, description="Detected domain")
+    
+    # Metadata
+    status: DocumentStatus = Field(default=DocumentStatus.UPLOADING)
+    error_message: str | None = Field(default=None, description="Error if failed")
+    page_count: int = Field(default=1, description="Number of pages/sheets")
+    
+    # Timestamps
+    created_at: datetime = Field(default_factory=datetime.now)
+    processed_at: datetime | None = Field(default=None)
+
+    model_config = {"ser_json_always": True}
+
+
+class DocumentChunk(BaseModel):
+    """A chunk of a document, typically split by date or section.
+    
+    Stores the original content for accurate reference during search.
+    """
+
+    id: str = Field(..., description="Chunk ID")
+    document_id: str = Field(..., description="Parent document ID")
+    content: str = Field(..., description="Original content of the chunk (preserved exactly)")
+    chunk_index: int = Field(..., description="Position of chunk within document (0-based)")
+    
+    # Date information for the chunk
+    chunk_date: datetime | None = Field(default=None, description="Date associated with this chunk")
+    chunk_date_end: datetime | None = Field(default=None, description="End date if chunk spans a period")
+    
+    # Metadata
+    heading: str = Field(default="", description="Section heading if available")
+    char_count: int = Field(default=0, description="Number of characters in content")
+    
+    # Timestamps
+    created_at: datetime = Field(default_factory=datetime.now)
+
+    model_config = {"ser_json_always": True}
+
+
+class ExtractedFact(BaseModel):
+    """A fact extracted from a document by LLM."""
+
+    subject: str = Field(..., description="Subject entity")
+    predicate: str = Field(..., description="Relationship type")
+    object: str = Field(..., description="Object/value")
+    confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+    source_context: str = Field(default="", description="Context from document")
+    # Temporal information
+    event_date: datetime | None = Field(default=None, description="Date when the event occurred")
+    event_date_end: datetime | None = Field(default=None, description="End date for date ranges")
+    date_type: DateType = Field(default=DateType.UNKNOWN, description="Type of date information")
+
+
+class DocumentExtractionResult(BaseModel):
+    """Result of LLM extraction from a document."""
+
+    summary: str = Field(..., description="2-3 sentence summary")
+    facts: list[ExtractedFact] = Field(default_factory=list)
+    topics: list[str] = Field(default_factory=list)
+    entities: list[str] = Field(default_factory=list)
+    domain: Domain = Field(default=Domain.GENERAL)
+
+
+class TopicStats(BaseModel):
+    """Statistics for a topic/entity."""
+
+    name: str = Field(..., description="Topic or entity name")
+    fact_count: int = Field(default=0, description="Number of related facts")
+    document_count: int = Field(default=0, description="Number of related documents")
+    last_updated: datetime | None = Field(default=None)
+    
+    model_config = {"ser_json_always": True}
+
+
+class TopicSummary(BaseModel):
+    """LLM-generated summary for a topic."""
+
+    topic: str = Field(..., description="Topic name")
+    summary: str = Field(..., description="Comprehensive summary")
+    key_points: list[str] = Field(default_factory=list, description="Main points")
+    related_entities: list[str] = Field(default_factory=list)
+    fact_count: int = Field(default=0)
+    document_count: int = Field(default=0)
+    time_range: str = Field(default="", description="Time range of facts")
+    generated_at: datetime = Field(default_factory=datetime.now)
+
+    model_config = {"ser_json_always": True}
+
+
+class KnowledgeStats(BaseModel):
+    """Overall knowledge base statistics."""
+
+    total_facts: int = Field(default=0)
+    total_documents: int = Field(default=0)
+    total_sessions: int = Field(default=0)
+    topics: list[TopicStats] = Field(default_factory=list)
+    entities: list[TopicStats] = Field(default_factory=list)
+    
     model_config = {"ser_json_always": True}
