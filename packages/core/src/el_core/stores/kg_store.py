@@ -720,6 +720,95 @@ class KnowledgeGraphStore:
             )
             logger.info(f"Updated session {session_id} status to {status}")
 
+    # Conversation Turn persistence methods
+
+    async def save_conversation_turn(
+        self,
+        session_id: str,
+        turn_index: int,
+        user_message: str,
+        assistant_response: str,
+        timestamp: datetime | None = None,
+    ) -> str:
+        """Save a conversation turn to Neo4j.
+
+        Args:
+            session_id: Session ID.
+            turn_index: Index of this turn (0-based).
+            user_message: User's message.
+            assistant_response: Assistant's response.
+            timestamp: When the turn occurred.
+
+        Returns:
+            The turn ID.
+        """
+        turn_id = str(uuid.uuid4())
+        now = timestamp or datetime.now()
+
+        cypher = """
+        MATCH (s:Session {id: $session_id})
+        CREATE (t:ConversationTurn {
+            id: $turn_id,
+            session_id: $session_id,
+            turn_index: $turn_index,
+            user_message: $user_message,
+            assistant_response: $assistant_response,
+            timestamp: $timestamp
+        })
+        CREATE (s)-[:HAS_TURN]->(t)
+        RETURN t.id AS id
+        """
+
+        async with self.driver.session() as session:
+            result = await session.run(
+                cypher,
+                turn_id=turn_id,
+                session_id=session_id,
+                turn_index=turn_index,
+                user_message=user_message,
+                assistant_response=assistant_response,
+                timestamp=now.isoformat(),
+            )
+            record = await result.single()
+            logger.info(f"Saved conversation turn {turn_index} for session {session_id}")
+            return record["id"] if record else turn_id
+
+    async def get_conversation_history(
+        self,
+        session_id: str,
+    ) -> list[dict[str, Any]]:
+        """Get all conversation turns for a session.
+
+        Args:
+            session_id: Session ID.
+
+        Returns:
+            List of turn dictionaries with user_message, assistant_response, timestamp.
+        """
+        cypher = """
+        MATCH (s:Session {id: $session_id})-[:HAS_TURN]->(t:ConversationTurn)
+        RETURN 
+            t.turn_index AS turn_index,
+            t.user_message AS user_message,
+            t.assistant_response AS assistant_response,
+            t.timestamp AS timestamp
+        ORDER BY t.turn_index ASC
+        """
+
+        turns: list[dict[str, Any]] = []
+
+        async with self.driver.session() as session:
+            result = await session.run(cypher, session_id=session_id)
+            async for record in result:
+                turns.append({
+                    "turn_index": record["turn_index"],
+                    "user_message": record["user_message"],
+                    "assistant_response": record["assistant_response"],
+                    "timestamp": datetime.fromisoformat(record["timestamp"]) if record["timestamp"] else None,
+                })
+
+        return turns
+
     # Fact versioning methods
 
     async def get_fact_with_history(self, fact_id: str) -> FactWithHistory | None:
@@ -1752,6 +1841,10 @@ class KnowledgeGraphStore:
             "CREATE INDEX fact_version_id IF NOT EXISTS FOR (v:FactVersion) ON (v.id)",
             "CREATE INDEX document_id IF NOT EXISTS FOR (d:Document) ON (d.id)",
             "CREATE INDEX document_status IF NOT EXISTS FOR (d:Document) ON (d.status)",
+            # Conversation turn indexes
+            "CREATE INDEX turn_id IF NOT EXISTS FOR (t:ConversationTurn) ON (t.id)",
+            "CREATE INDEX turn_session IF NOT EXISTS FOR (t:ConversationTurn) ON (t.session_id)",
+            "CREATE INDEX turn_index IF NOT EXISTS FOR (t:ConversationTurn) ON (t.turn_index)",
             # Chunk indexes
             "CREATE INDEX chunk_id IF NOT EXISTS FOR (c:Chunk) ON (c.id)",
             "CREATE INDEX chunk_date IF NOT EXISTS FOR (c:Chunk) ON (c.chunk_date)",

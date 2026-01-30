@@ -570,24 +570,51 @@ class ELAgent:
             session.prior_knowledge = session_insights
             session.prior_context = self._format_prior_knowledge(session_insights, detected_lang)
 
+        # Load conversation history from Neo4j
+        conversation_turns = await self._kg_store.get_conversation_history(session_id)
+        for turn_data in conversation_turns:
+            # Restore turn to session
+            turn = ConversationTurn(
+                user_message=turn_data["user_message"],
+                assistant_response=turn_data["assistant_response"],
+                timestamp=turn_data["timestamp"],
+            )
+            session.turns.append(turn)
+            # Also restore to message_history for LLM context
+            session.message_history.append({"role": "user", "content": turn_data["user_message"]})
+            session.message_history.append({"role": "assistant", "content": turn_data["assistant_response"]})
+
         # Store in active sessions
         self._sessions[session_id] = session
 
-        # Generate resume message (from Neo4j - no conversation history available)
+        # Generate resume message
+        has_history = len(conversation_turns) > 0
         if detected_lang.lower() in ("english", "en"):
-            resume_msg = (
-                f"Welcome back! We were discussing \"{metadata.topic}\". "
-                f"Last time we had {metadata.turn_count} exchanges and saved {metadata.insights_count} insights. "
-                f"(Note: Conversation history was not persisted. Starting fresh but with your insights!)"
-            )
+            if has_history:
+                resume_msg = (
+                    f"Welcome back! We were discussing \"{metadata.topic}\". "
+                    f"Your previous {len(conversation_turns)} exchanges have been restored. "
+                    f"Let's continue!"
+                )
+            else:
+                resume_msg = (
+                    f"Welcome back! We were discussing \"{metadata.topic}\". "
+                    f"(Note: No conversation history found. Starting fresh but with your insights!)"
+                )
         else:
-            resume_msg = (
-                f"「{metadata.topic}」の続きですね。お帰りなさい！\n"
-                f"前回は{metadata.turn_count}ターンの会話で、{metadata.insights_count}件の洞察を記録しました。\n"
-                f"（※会話履歴は保存されていませんが、記録した事実は引き継いでいます）"
-            )
+            if has_history:
+                resume_msg = (
+                    f"「{metadata.topic}」の続きですね。お帰りなさい！\n"
+                    f"前回の{len(conversation_turns)}ターンの会話を復元しました。\n"
+                    f"続けましょう！"
+                )
+            else:
+                resume_msg = (
+                    f"「{metadata.topic}」の続きですね。お帰りなさい！\n"
+                    f"（※会話履歴が見つかりませんでしたが、記録した事実は引き継いでいます）"
+                )
 
-        logger.info(f"Resumed session {session_id} for user {user_id}")
+        logger.info(f"Resumed session {session_id} for user {user_id} ({len(conversation_turns)} turns restored)")
 
         return session_id, resume_msg, session_insights
 
@@ -897,6 +924,19 @@ Example:
                 await self._save_session_metadata(session)
             except Exception as e:
                 logger.warning(f"Failed to update session metadata: {e}")
+
+        # Save conversation turn to Neo4j for persistence
+        if self._kg_store:
+            try:
+                await self._kg_store.save_conversation_turn(
+                    session_id=session_id,
+                    turn_index=len(session.turns) - 1,
+                    user_message=user_message,
+                    assistant_response=response_text,
+                    timestamp=turn.timestamp,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to save conversation turn: {e}")
 
         # Build tool calls list for response
         tool_calls = [
