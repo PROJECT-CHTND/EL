@@ -49,6 +49,7 @@ class Message(BaseModel):
 class Insight(BaseModel):
     """An insight extracted from the conversation and saved to knowledge graph."""
 
+    id: str | None = Field(default=None, description="Unique identifier (set after saving)")
     subject: str = Field(..., description="Subject entity of the insight")
     predicate: str = Field(..., description="Relationship type (e.g., has_insight, learned_that)")
     object: str = Field(..., description="Object/content of the insight")
@@ -261,7 +262,7 @@ class ConsistencyIssue(BaseModel):
 
 
 class AgentResponse(BaseModel):
-    """Response from the EL Agent."""
+    """Response from Eager Learner (EL)."""
 
     message: str = Field(..., description="The assistant's response message")
     tool_calls: list[ToolCall] = Field(default_factory=list)
@@ -402,4 +403,114 @@ class KnowledgeStats(BaseModel):
     topics: list[TopicStats] = Field(default_factory=list)
     entities: list[TopicStats] = Field(default_factory=list)
     
+    model_config = {"ser_json_always": True}
+
+
+# ==================== Tag System Schemas ====================
+
+
+class Tag(BaseModel):
+    """A tag for categorizing insights and documents."""
+
+    id: str = Field(..., description="Tag ID")
+    name: str = Field(..., description="Normalized tag name")
+    aliases: list[str] = Field(default_factory=list, description="Alternative names merged into this tag")
+    color: str | None = Field(default=None, description="UI display color (hex code)")
+    description: str = Field(default="", description="Optional tag description")
+    usage_count: int = Field(default=0, description="Number of items tagged")
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+    model_config = {"ser_json_always": True}
+
+
+class TagStats(BaseModel):
+    """Statistics for a tag."""
+
+    id: str = Field(..., description="Tag ID")
+    name: str = Field(..., description="Tag name")
+    aliases: list[str] = Field(default_factory=list)
+    color: str | None = Field(default=None)
+    insight_count: int = Field(default=0, description="Number of insights with this tag")
+    document_count: int = Field(default=0, description="Number of documents with this tag")
+    total_count: int = Field(default=0, description="Total items tagged")
+    avg_relevance: float = Field(default=0.0, description="Average relevance score")
+    last_used: datetime | None = Field(default=None)
+    created_at: datetime = Field(default_factory=datetime.now)
+
+    model_config = {"ser_json_always": True}
+
+
+class TaggedItemType(str, Enum):
+    """Type of tagged item."""
+
+    INSIGHT = "insight"
+    DOCUMENT = "document"
+    CHUNK = "chunk"
+
+
+class TaggedItem(BaseModel):
+    """An item tagged with a specific tag, including relevance score."""
+
+    item_id: str = Field(..., description="ID of the tagged item")
+    item_type: TaggedItemType = Field(..., description="Type of item")
+    relevance: float = Field(default=0.8, ge=0.0, le=1.0, description="Relevance score 0.0-1.0")
+    
+    # Item details (populated when fetched)
+    title: str = Field(default="", description="Display title of the item")
+    summary: str = Field(default="", description="Brief summary or preview")
+    created_at: datetime | None = Field(default=None)
+    
+    # For insights
+    subject: str | None = Field(default=None)
+    predicate: str | None = Field(default=None)
+    object: str | None = Field(default=None)
+    
+    # For documents
+    filename: str | None = Field(default=None)
+
+    model_config = {"ser_json_always": True}
+
+
+class TagSuggestion(BaseModel):
+    """A tag suggestion from LLM analysis."""
+
+    name: str = Field(..., description="Suggested tag name")
+    relevance: float = Field(default=0.8, ge=0.0, le=1.0, description="Relevance to the content")
+    reason: str = Field(default="", description="Why this tag was suggested")
+    existing_tag_id: str | None = Field(default=None, description="ID if matches existing tag")
+    is_new: bool = Field(default=True, description="Whether this is a new tag")
+
+    model_config = {"ser_json_always": True}
+
+
+class TagSuggestionResult(BaseModel):
+    """Result of tag suggestion analysis."""
+
+    suggestions: list[TagSuggestion] = Field(default_factory=list)
+    content_summary: str = Field(default="", description="Brief summary of analyzed content")
+    existing_tags_matched: int = Field(default=0)
+    new_tags_suggested: int = Field(default=0)
+
+    model_config = {"ser_json_always": True}
+
+
+class TagMergeRequest(BaseModel):
+    """Request to merge multiple tags into one."""
+
+    source_tag_ids: list[str] = Field(..., description="Tags to merge (will be deleted)")
+    target_tag_id: str = Field(..., description="Tag to merge into (will be kept)")
+    add_as_aliases: bool = Field(default=True, description="Add source names as aliases")
+
+    model_config = {"frozen": True}
+
+
+class TagMergeResult(BaseModel):
+    """Result of tag merge operation."""
+
+    target_tag: Tag = Field(..., description="The merged tag")
+    merged_count: int = Field(default=0, description="Number of tags merged")
+    items_updated: int = Field(default=0, description="Number of item relationships updated")
+    aliases_added: list[str] = Field(default_factory=list)
+
     model_config = {"ser_json_always": True}

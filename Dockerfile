@@ -1,4 +1,4 @@
-# EL Agent Dockerfile
+# Eager Learner (EL) Dockerfile
 FROM python:3.11-slim
 
 WORKDIR /app

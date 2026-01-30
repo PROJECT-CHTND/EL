@@ -1,4 +1,4 @@
-"""System prompts for the EL Agent."""
+"""System prompts for Eager Learner (EL)."""
 
 from __future__ import annotations
 

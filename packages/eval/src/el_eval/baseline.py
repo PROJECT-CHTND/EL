@@ -1,4 +1,4 @@
-"""Baseline agents for comparison with EL Agent."""
+"""Baseline agents for comparison with Eager Learner."""
 
 from __future__ import annotations
 

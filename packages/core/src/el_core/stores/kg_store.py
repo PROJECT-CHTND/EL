@@ -24,6 +24,10 @@ from el_core.schemas import (
     KnowledgeStats,
     SessionMetadata,
     SessionSummary,
+    Tag,
+    TaggedItem,
+    TaggedItemType,
+    TagStats,
     TopicStats,
 )
 
@@ -1264,6 +1268,52 @@ class KnowledgeGraphStore:
         async with self.driver.session() as session:
             await session.run(cypher, fact_id=fact_id, document_id=document_id)
 
+    async def get_insights_for_document(self, document_id: str) -> list[Insight]:
+        """Get all insights/facts extracted from a document.
+
+        Args:
+            document_id: The document ID.
+
+        Returns:
+            List of insights linked to the document.
+        """
+        # Insight subject/object are stored as Entity relationships
+        cypher = """
+        MATCH (d:Document {id: $document_id})-[:EXTRACTED]->(i:Insight)
+        OPTIONAL MATCH (s:Entity)-[:SUBJECT_OF]->(i)
+        OPTIONAL MATCH (i)-[:HAS_OBJECT]->(o:Entity)
+        RETURN i, s.name AS subject, o.name AS object
+        ORDER BY i.created_at DESC
+        """
+
+        insights: list[Insight] = []
+        async with self.driver.session() as session:
+            result = await session.run(cypher, document_id=document_id)
+            async for record in result:
+                node = record["i"]
+                subject = record["subject"]
+                obj = record["object"]
+                
+                # Skip insights with missing required fields
+                if not subject or not obj:
+                    continue
+                try:
+                    insights.append(Insight(
+                        id=node["id"],
+                        subject=subject,
+                        predicate=node.get("predicate", ""),
+                        object=obj,
+                        confidence=node.get("confidence", 1.0),
+                        domain=Domain(node.get("domain", "general")),
+                        event_date=datetime.fromisoformat(node["event_date"]) if node.get("event_date") else None,
+                        event_date_end=datetime.fromisoformat(node["event_date_end"]) if node.get("event_date_end") else None,
+                        date_type=DateType(node["date_type"]) if node.get("date_type") else None,
+                    ))
+                except Exception as e:
+                    logger.warning(f"Failed to parse insight {node.get('id')}: {e}")
+                    continue
+        return insights
+
     # ==================== Knowledge Aggregation ====================
 
     async def get_all_topics(self, limit: int = 50) -> list[TopicStats]:
@@ -1849,6 +1899,10 @@ class KnowledgeGraphStore:
             "CREATE INDEX chunk_id IF NOT EXISTS FOR (c:Chunk) ON (c.id)",
             "CREATE INDEX chunk_date IF NOT EXISTS FOR (c:Chunk) ON (c.chunk_date)",
             "CREATE INDEX chunk_document IF NOT EXISTS FOR (c:Chunk) ON (c.document_id)",
+            # Tag indexes
+            "CREATE INDEX tag_id IF NOT EXISTS FOR (t:Tag) ON (t.id)",
+            "CREATE INDEX tag_name IF NOT EXISTS FOR (t:Tag) ON (t.name)",
+            "CREATE INDEX tag_usage IF NOT EXISTS FOR (t:Tag) ON (t.usage_count)",
             """
             CREATE FULLTEXT INDEX insight_search IF NOT EXISTS 
             FOR (i:Insight) ON EACH [i.predicate]
@@ -1860,6 +1914,10 @@ class KnowledgeGraphStore:
             """
             CREATE FULLTEXT INDEX summary_search IF NOT EXISTS 
             FOR (sum:Summary) ON EACH [sum.content, sum.topics]
+            """,
+            """
+            CREATE FULLTEXT INDEX tag_search IF NOT EXISTS
+            FOR (t:Tag) ON EACH [t.name, t.aliases]
             """,
         ]
 
@@ -1953,3 +2011,782 @@ class KnowledgeGraphStore:
                 ))
 
         return items
+
+    # ==================== Tag Management ====================
+
+    async def save_tag(self, tag: Tag) -> str:
+        """Save a tag to the knowledge graph.
+
+        Args:
+            tag: The tag to save.
+
+        Returns:
+            The tag ID.
+        """
+        cypher = """
+        MERGE (t:Tag {id: $id})
+        SET t.name = $name,
+            t.aliases = $aliases,
+            t.color = $color,
+            t.description = $description,
+            t.usage_count = $usage_count,
+            t.created_at = $created_at,
+            t.updated_at = $updated_at
+        RETURN t.id AS id
+        """
+
+        async with self.driver.session() as session:
+            result = await session.run(
+                cypher,
+                id=tag.id,
+                name=tag.name,
+                aliases=tag.aliases,
+                color=tag.color,
+                description=tag.description,
+                usage_count=tag.usage_count,
+                created_at=tag.created_at.isoformat(),
+                updated_at=tag.updated_at.isoformat(),
+            )
+            record = await result.single()
+            logger.info(f"Saved tag: {tag.name} ({tag.id})")
+            return record["id"] if record else tag.id
+
+    async def create_tag(self, name: str, color: str | None = None, description: str = "") -> Tag:
+        """Create a new tag with auto-generated ID.
+
+        Args:
+            name: Tag name.
+            color: Optional color for UI display.
+            description: Optional description.
+
+        Returns:
+            The created Tag object.
+        """
+        tag = Tag(
+            id=str(uuid.uuid4()),
+            name=name.strip(),
+            aliases=[],
+            color=color,
+            description=description,
+            usage_count=0,
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        )
+        await self.save_tag(tag)
+        return tag
+
+    async def get_tag(self, tag_id: str) -> Tag | None:
+        """Get a tag by ID.
+
+        Args:
+            tag_id: Tag ID.
+
+        Returns:
+            Tag if found, None otherwise.
+        """
+        cypher = """
+        MATCH (t:Tag {id: $tag_id})
+        RETURN t
+        """
+
+        async with self.driver.session() as session:
+            result = await session.run(cypher, tag_id=tag_id)
+            record = await result.single()
+
+            if not record:
+                return None
+
+            node = record["t"]
+            return Tag(
+                id=node["id"],
+                name=node["name"],
+                aliases=list(node.get("aliases", [])),
+                color=node.get("color"),
+                description=node.get("description", ""),
+                usage_count=node.get("usage_count", 0),
+                created_at=datetime.fromisoformat(node["created_at"]),
+                updated_at=datetime.fromisoformat(node["updated_at"]),
+            )
+
+    async def get_tag_by_name(self, name: str) -> Tag | None:
+        """Get a tag by name (case-insensitive) or alias.
+
+        Args:
+            name: Tag name or alias to search for.
+
+        Returns:
+            Tag if found, None otherwise.
+        """
+        normalized_name = name.strip().lower()
+        cypher = """
+        MATCH (t:Tag)
+        WHERE toLower(t.name) = $name 
+           OR any(alias IN t.aliases WHERE toLower(alias) = $name)
+        RETURN t
+        """
+
+        async with self.driver.session() as session:
+            result = await session.run(cypher, name=normalized_name)
+            record = await result.single()
+
+            if not record:
+                return None
+
+            node = record["t"]
+            return Tag(
+                id=node["id"],
+                name=node["name"],
+                aliases=list(node.get("aliases", [])),
+                color=node.get("color"),
+                description=node.get("description", ""),
+                usage_count=node.get("usage_count", 0),
+                created_at=datetime.fromisoformat(node["created_at"]),
+                updated_at=datetime.fromisoformat(node["updated_at"]),
+            )
+
+    async def get_all_tags(self, limit: int = 100) -> list[Tag]:
+        """Get all tags ordered by usage count.
+
+        Args:
+            limit: Maximum number of tags.
+
+        Returns:
+            List of tags.
+        """
+        cypher = """
+        MATCH (t:Tag)
+        RETURN t
+        ORDER BY t.usage_count DESC
+        LIMIT $limit
+        """
+
+        tags: list[Tag] = []
+
+        async with self.driver.session() as session:
+            result = await session.run(cypher, limit=limit)
+            async for record in result:
+                node = record["t"]
+                tags.append(Tag(
+                    id=node["id"],
+                    name=node["name"],
+                    aliases=list(node.get("aliases", [])),
+                    color=node.get("color"),
+                    description=node.get("description", ""),
+                    usage_count=node.get("usage_count", 0),
+                    created_at=datetime.fromisoformat(node["created_at"]),
+                    updated_at=datetime.fromisoformat(node["updated_at"]),
+                ))
+
+        return tags
+
+    async def get_tag_stats(self, tag_id: str) -> TagStats | None:
+        """Get statistics for a tag.
+
+        Args:
+            tag_id: Tag ID.
+
+        Returns:
+            TagStats if found, None otherwise.
+        """
+        cypher = """
+        MATCH (t:Tag {id: $tag_id})
+        OPTIONAL MATCH (i:Insight)-[ri:HAS_TAG]->(t)
+        OPTIONAL MATCH (d:Document)-[rd:HAS_TAG]->(t)
+        WITH t, 
+             count(DISTINCT i) AS insight_count,
+             count(DISTINCT d) AS document_count,
+             avg(coalesce(ri.relevance, 0.5)) AS avg_insight_relevance,
+             avg(coalesce(rd.relevance, 0.5)) AS avg_doc_relevance,
+             max(coalesce(ri.created_at, rd.created_at)) AS last_used
+        RETURN t, insight_count, document_count,
+               (avg_insight_relevance + avg_doc_relevance) / 2 AS avg_relevance,
+               last_used
+        """
+
+        async with self.driver.session() as session:
+            result = await session.run(cypher, tag_id=tag_id)
+            record = await result.single()
+
+            if not record:
+                return None
+
+            node = record["t"]
+            return TagStats(
+                id=node["id"],
+                name=node["name"],
+                aliases=list(node.get("aliases", [])),
+                color=node.get("color"),
+                insight_count=record["insight_count"],
+                document_count=record["document_count"],
+                total_count=record["insight_count"] + record["document_count"],
+                avg_relevance=record["avg_relevance"] or 0.0,
+                last_used=datetime.fromisoformat(record["last_used"]) if record["last_used"] else None,
+                created_at=datetime.fromisoformat(node["created_at"]),
+            )
+
+    async def get_all_tag_stats(self, limit: int = 100) -> list[TagStats]:
+        """Get statistics for all tags.
+
+        Args:
+            limit: Maximum number of tags.
+
+        Returns:
+            List of tag statistics.
+        """
+        cypher = """
+        MATCH (t:Tag)
+        OPTIONAL MATCH (i:Insight)-[ri:HAS_TAG]->(t)
+        OPTIONAL MATCH (d:Document)-[rd:HAS_TAG]->(t)
+        WITH t, 
+             count(DISTINCT i) AS insight_count,
+             count(DISTINCT d) AS document_count,
+             avg(coalesce(ri.relevance, 0.5)) AS avg_insight_relevance,
+             avg(coalesce(rd.relevance, 0.5)) AS avg_doc_relevance,
+             max(coalesce(ri.created_at, rd.created_at)) AS last_used
+        RETURN t, insight_count, document_count,
+               CASE WHEN insight_count + document_count > 0 
+                    THEN (coalesce(avg_insight_relevance, 0) + coalesce(avg_doc_relevance, 0)) / 2
+                    ELSE 0 END AS avg_relevance,
+               last_used
+        ORDER BY insight_count + document_count DESC
+        LIMIT $limit
+        """
+
+        stats: list[TagStats] = []
+
+        async with self.driver.session() as session:
+            result = await session.run(cypher, limit=limit)
+            async for record in result:
+                node = record["t"]
+                stats.append(TagStats(
+                    id=node["id"],
+                    name=node["name"],
+                    aliases=list(node.get("aliases", [])),
+                    color=node.get("color"),
+                    insight_count=record["insight_count"],
+                    document_count=record["document_count"],
+                    total_count=record["insight_count"] + record["document_count"],
+                    avg_relevance=record["avg_relevance"] or 0.0,
+                    last_used=datetime.fromisoformat(record["last_used"]) if record["last_used"] else None,
+                    created_at=datetime.fromisoformat(node["created_at"]),
+                ))
+
+        return stats
+
+    async def update_tag(
+        self,
+        tag_id: str,
+        name: str | None = None,
+        color: str | None = None,
+        description: str | None = None,
+        aliases: list[str] | None = None,
+    ) -> Tag | None:
+        """Update a tag.
+
+        Args:
+            tag_id: Tag ID.
+            name: New name (optional).
+            color: New color (optional).
+            description: New description (optional).
+            aliases: New aliases list (optional).
+
+        Returns:
+            Updated Tag if found, None otherwise.
+        """
+        set_clauses = ["t.updated_at = $updated_at"]
+        params: dict[str, Any] = {
+            "tag_id": tag_id,
+            "updated_at": datetime.now().isoformat(),
+        }
+
+        if name is not None:
+            set_clauses.append("t.name = $name")
+            params["name"] = name.strip()
+
+        if color is not None:
+            set_clauses.append("t.color = $color")
+            params["color"] = color
+
+        if description is not None:
+            set_clauses.append("t.description = $description")
+            params["description"] = description
+
+        if aliases is not None:
+            set_clauses.append("t.aliases = $aliases")
+            params["aliases"] = aliases
+
+        cypher = f"""
+        MATCH (t:Tag {{id: $tag_id}})
+        SET {', '.join(set_clauses)}
+        RETURN t
+        """
+
+        async with self.driver.session() as session:
+            result = await session.run(cypher, **params)
+            record = await result.single()
+
+            if not record:
+                return None
+
+            node = record["t"]
+            logger.info(f"Updated tag: {tag_id}")
+            return Tag(
+                id=node["id"],
+                name=node["name"],
+                aliases=list(node.get("aliases", [])),
+                color=node.get("color"),
+                description=node.get("description", ""),
+                usage_count=node.get("usage_count", 0),
+                created_at=datetime.fromisoformat(node["created_at"]),
+                updated_at=datetime.fromisoformat(node["updated_at"]),
+            )
+
+    async def delete_tag(self, tag_id: str) -> bool:
+        """Delete a tag and its relationships.
+
+        Args:
+            tag_id: Tag ID.
+
+        Returns:
+            True if deleted, False if not found.
+        """
+        cypher = """
+        MATCH (t:Tag {id: $tag_id})
+        DETACH DELETE t
+        RETURN count(t) AS deleted
+        """
+
+        async with self.driver.session() as session:
+            result = await session.run(cypher, tag_id=tag_id)
+            record = await result.single()
+            deleted = record["deleted"] > 0
+            if deleted:
+                logger.info(f"Deleted tag: {tag_id}")
+            return deleted
+
+    async def tag_insight(
+        self,
+        insight_id: str,
+        tag_id: str,
+        relevance: float = 0.8,
+    ) -> None:
+        """Add a tag to an insight with relevance score.
+
+        Args:
+            insight_id: Insight ID.
+            tag_id: Tag ID.
+            relevance: Relevance score (0.0-1.0).
+        """
+        cypher = """
+        MATCH (i:Insight {id: $insight_id})
+        MATCH (t:Tag {id: $tag_id})
+        MERGE (i)-[r:HAS_TAG]->(t)
+        SET r.relevance = $relevance,
+            r.created_at = $created_at
+        WITH t
+        SET t.usage_count = t.usage_count + 1,
+            t.updated_at = $created_at
+        """
+
+        async with self.driver.session() as session:
+            await session.run(
+                cypher,
+                insight_id=insight_id,
+                tag_id=tag_id,
+                relevance=relevance,
+                created_at=datetime.now().isoformat(),
+            )
+            logger.debug(f"Tagged insight {insight_id} with tag {tag_id} (relevance: {relevance})")
+
+    async def tag_document(
+        self,
+        document_id: str,
+        tag_id: str,
+        relevance: float = 0.8,
+    ) -> None:
+        """Add a tag to a document with relevance score.
+
+        Args:
+            document_id: Document ID.
+            tag_id: Tag ID.
+            relevance: Relevance score (0.0-1.0).
+        """
+        cypher = """
+        MATCH (d:Document {id: $document_id})
+        MATCH (t:Tag {id: $tag_id})
+        MERGE (d)-[r:HAS_TAG]->(t)
+        SET r.relevance = $relevance,
+            r.created_at = $created_at
+        WITH t
+        SET t.usage_count = t.usage_count + 1,
+            t.updated_at = $created_at
+        """
+
+        async with self.driver.session() as session:
+            await session.run(
+                cypher,
+                document_id=document_id,
+                tag_id=tag_id,
+                relevance=relevance,
+                created_at=datetime.now().isoformat(),
+            )
+            logger.debug(f"Tagged document {document_id} with tag {tag_id} (relevance: {relevance})")
+
+    async def untag_insight(self, insight_id: str, tag_id: str) -> bool:
+        """Remove a tag from an insight.
+
+        Args:
+            insight_id: Insight ID.
+            tag_id: Tag ID.
+
+        Returns:
+            True if relationship was removed, False otherwise.
+        """
+        cypher = """
+        MATCH (i:Insight {id: $insight_id})-[r:HAS_TAG]->(t:Tag {id: $tag_id})
+        DELETE r
+        WITH t
+        SET t.usage_count = CASE WHEN t.usage_count > 0 THEN t.usage_count - 1 ELSE 0 END
+        RETURN 1 AS removed
+        """
+
+        async with self.driver.session() as session:
+            result = await session.run(cypher, insight_id=insight_id, tag_id=tag_id)
+            record = await result.single()
+            return record is not None
+
+    async def untag_document(self, document_id: str, tag_id: str) -> bool:
+        """Remove a tag from a document.
+
+        Args:
+            document_id: Document ID.
+            tag_id: Tag ID.
+
+        Returns:
+            True if relationship was removed, False otherwise.
+        """
+        cypher = """
+        MATCH (d:Document {id: $document_id})-[r:HAS_TAG]->(t:Tag {id: $tag_id})
+        DELETE r
+        WITH t
+        SET t.usage_count = CASE WHEN t.usage_count > 0 THEN t.usage_count - 1 ELSE 0 END
+        RETURN 1 AS removed
+        """
+
+        async with self.driver.session() as session:
+            result = await session.run(cypher, document_id=document_id, tag_id=tag_id)
+            record = await result.single()
+            return record is not None
+
+    async def get_items_by_tag(
+        self,
+        tag_id: str,
+        item_type: TaggedItemType | None = None,
+        limit: int = 50,
+    ) -> list[TaggedItem]:
+        """Get all items tagged with a specific tag.
+
+        Args:
+            tag_id: Tag ID.
+            item_type: Filter by item type (optional).
+            limit: Maximum number of items.
+
+        Returns:
+            List of tagged items with relevance scores.
+        """
+        items: list[TaggedItem] = []
+
+        # Get insights
+        if item_type is None or item_type == TaggedItemType.INSIGHT:
+            insight_cypher = """
+            MATCH (t:Tag {id: $tag_id})<-[r:HAS_TAG]-(i:Insight)
+            MATCH (s:Entity)-[:SUBJECT_OF]->(i)-[:HAS_OBJECT]->(o:Entity)
+            RETURN i.id AS id, r.relevance AS relevance, r.created_at AS tagged_at,
+                   s.name AS subject, i.predicate AS predicate, o.name AS object,
+                   i.created_at AS created_at
+            ORDER BY r.relevance DESC
+            LIMIT $limit
+            """
+
+            async with self.driver.session() as session:
+                result = await session.run(insight_cypher, tag_id=tag_id, limit=limit)
+                async for record in result:
+                    items.append(TaggedItem(
+                        item_id=record["id"],
+                        item_type=TaggedItemType.INSIGHT,
+                        relevance=record["relevance"] or 0.8,
+                        title=f"{record['subject']} {record['predicate']}",
+                        summary=record["object"],
+                        created_at=datetime.fromisoformat(record["created_at"]) if record["created_at"] else None,
+                        subject=record["subject"],
+                        predicate=record["predicate"],
+                        object=record["object"],
+                    ))
+
+        # Get documents
+        if item_type is None or item_type == TaggedItemType.DOCUMENT:
+            doc_cypher = """
+            MATCH (t:Tag {id: $tag_id})<-[r:HAS_TAG]-(d:Document)
+            RETURN d.id AS id, r.relevance AS relevance, r.created_at AS tagged_at,
+                   d.filename AS filename, d.extracted_summary AS summary,
+                   d.created_at AS created_at
+            ORDER BY r.relevance DESC
+            LIMIT $limit
+            """
+
+            async with self.driver.session() as session:
+                result = await session.run(doc_cypher, tag_id=tag_id, limit=limit)
+                async for record in result:
+                    items.append(TaggedItem(
+                        item_id=record["id"],
+                        item_type=TaggedItemType.DOCUMENT,
+                        relevance=record["relevance"] or 0.8,
+                        title=record["filename"],
+                        summary=record["summary"] or "",
+                        created_at=datetime.fromisoformat(record["created_at"]) if record["created_at"] else None,
+                        filename=record["filename"],
+                    ))
+
+        # Sort by relevance
+        items.sort(key=lambda x: x.relevance, reverse=True)
+        return items[:limit]
+
+    async def get_tags_for_insight(self, insight_id: str) -> list[tuple[Tag, float]]:
+        """Get all tags for an insight with their relevance scores.
+
+        Args:
+            insight_id: Insight ID.
+
+        Returns:
+            List of (Tag, relevance) tuples.
+        """
+        cypher = """
+        MATCH (i:Insight {id: $insight_id})-[r:HAS_TAG]->(t:Tag)
+        RETURN t, r.relevance AS relevance
+        ORDER BY r.relevance DESC
+        """
+
+        tags: list[tuple[Tag, float]] = []
+
+        async with self.driver.session() as session:
+            result = await session.run(cypher, insight_id=insight_id)
+            async for record in result:
+                node = record["t"]
+                tag = Tag(
+                    id=node["id"],
+                    name=node["name"],
+                    aliases=list(node.get("aliases", [])),
+                    color=node.get("color"),
+                    description=node.get("description", ""),
+                    usage_count=node.get("usage_count", 0),
+                    created_at=datetime.fromisoformat(node["created_at"]),
+                    updated_at=datetime.fromisoformat(node["updated_at"]),
+                )
+                tags.append((tag, record["relevance"] or 0.8))
+
+        return tags
+
+    async def get_tags_for_document(self, document_id: str) -> list[tuple[Tag, float]]:
+        """Get all tags for a document with their relevance scores.
+
+        Args:
+            document_id: Document ID.
+
+        Returns:
+            List of (Tag, relevance) tuples.
+        """
+        cypher = """
+        MATCH (d:Document {id: $document_id})-[r:HAS_TAG]->(t:Tag)
+        RETURN t, r.relevance AS relevance
+        ORDER BY r.relevance DESC
+        """
+
+        tags: list[tuple[Tag, float]] = []
+
+        async with self.driver.session() as session:
+            result = await session.run(cypher, document_id=document_id)
+            async for record in result:
+                node = record["t"]
+                tag = Tag(
+                    id=node["id"],
+                    name=node["name"],
+                    aliases=list(node.get("aliases", [])),
+                    color=node.get("color"),
+                    description=node.get("description", ""),
+                    usage_count=node.get("usage_count", 0),
+                    created_at=datetime.fromisoformat(node["created_at"]),
+                    updated_at=datetime.fromisoformat(node["updated_at"]),
+                )
+                tags.append((tag, record["relevance"] or 0.8))
+
+        return tags
+
+    async def merge_tags(
+        self,
+        source_tag_ids: list[str],
+        target_tag_id: str,
+        add_as_aliases: bool = True,
+    ) -> tuple[Tag | None, int]:
+        """Merge multiple tags into a single tag.
+
+        Args:
+            source_tag_ids: IDs of tags to merge (will be deleted).
+            target_tag_id: ID of target tag (will be kept).
+            add_as_aliases: Whether to add source names as aliases.
+
+        Returns:
+            Tuple of (merged Tag, number of relationships moved).
+        """
+        if not source_tag_ids:
+            return await self.get_tag(target_tag_id), 0
+
+        # First, get source tag names for aliases
+        source_names: list[str] = []
+        if add_as_aliases:
+            for source_id in source_tag_ids:
+                source_tag = await self.get_tag(source_id)
+                if source_tag:
+                    source_names.append(source_tag.name)
+                    source_names.extend(source_tag.aliases)
+
+        # Move all HAS_TAG relationships from source tags to target
+        move_cypher = """
+        MATCH (source:Tag)
+        WHERE source.id IN $source_ids
+        MATCH (item)-[r:HAS_TAG]->(source)
+        MATCH (target:Tag {id: $target_id})
+        MERGE (item)-[new_r:HAS_TAG]->(target)
+        SET new_r.relevance = coalesce(new_r.relevance, r.relevance),
+            new_r.created_at = coalesce(new_r.created_at, r.created_at)
+        DELETE r
+        RETURN count(r) AS moved
+        """
+
+        relationships_moved = 0
+        async with self.driver.session() as session:
+            result = await session.run(
+                move_cypher,
+                source_ids=source_tag_ids,
+                target_id=target_tag_id,
+            )
+            record = await result.single()
+            relationships_moved = record["moved"] if record else 0
+
+        # Update target tag with new aliases
+        if add_as_aliases and source_names:
+            target_tag = await self.get_tag(target_tag_id)
+            if target_tag:
+                # Merge aliases, avoiding duplicates
+                existing_aliases = set(target_tag.aliases)
+                existing_aliases.add(target_tag.name.lower())
+                new_aliases = [
+                    name for name in source_names
+                    if name.lower() not in existing_aliases
+                ]
+                await self.update_tag(
+                    target_tag_id,
+                    aliases=target_tag.aliases + new_aliases,
+                )
+
+        # Delete source tags
+        for source_id in source_tag_ids:
+            await self.delete_tag(source_id)
+
+        # Recalculate usage count for target
+        count_cypher = """
+        MATCH (t:Tag {id: $target_id})<-[:HAS_TAG]-(item)
+        WITH t, count(item) AS usage
+        SET t.usage_count = usage
+        """
+        async with self.driver.session() as session:
+            await session.run(count_cypher, target_id=target_tag_id)
+
+        merged_tag = await self.get_tag(target_tag_id)
+        logger.info(f"Merged {len(source_tag_ids)} tags into {target_tag_id}, moved {relationships_moved} relationships")
+
+        return merged_tag, relationships_moved
+
+    async def search_tags(self, query: str, limit: int = 10) -> list[Tag]:
+        """Search tags by name or alias.
+
+        Args:
+            query: Search query.
+            limit: Maximum number of results.
+
+        Returns:
+            List of matching tags.
+        """
+        # Try fulltext search first
+        try:
+            cypher = """
+            CALL db.index.fulltext.queryNodes('tag_search', $query)
+            YIELD node, score
+            WHERE node:Tag
+            RETURN node AS t, score
+            ORDER BY score DESC
+            LIMIT $limit
+            """
+            
+            tags: list[Tag] = []
+            async with self.driver.session() as session:
+                result = await session.run(cypher, query=query, limit=limit)
+                async for record in result:
+                    node = record["t"]
+                    tags.append(Tag(
+                        id=node["id"],
+                        name=node["name"],
+                        aliases=list(node.get("aliases", [])),
+                        color=node.get("color"),
+                        description=node.get("description", ""),
+                        usage_count=node.get("usage_count", 0),
+                        created_at=datetime.fromisoformat(node["created_at"]),
+                        updated_at=datetime.fromisoformat(node["updated_at"]),
+                    ))
+            return tags
+
+        except Exception as fulltext_err:
+            logger.debug(f"Fulltext search failed, falling back to basic search: {fulltext_err}")
+            # Fallback to basic search
+            try:
+                cypher = """
+                MATCH (t:Tag)
+                WHERE toLower(t.name) CONTAINS toLower($query)
+                   OR any(alias IN coalesce(t.aliases, []) WHERE toLower(alias) CONTAINS toLower($query))
+                RETURN t
+                ORDER BY t.usage_count DESC
+                LIMIT $limit
+                """
+
+                tags = []
+                async with self.driver.session() as session:
+                    result = await session.run(cypher, query=query, limit=limit)
+                    async for record in result:
+                        node = record["t"]
+                        tags.append(Tag(
+                            id=node["id"],
+                            name=node["name"],
+                            aliases=list(node.get("aliases", [])),
+                            color=node.get("color"),
+                            description=node.get("description", ""),
+                            usage_count=node.get("usage_count", 0),
+                            created_at=datetime.fromisoformat(node["created_at"]),
+                            updated_at=datetime.fromisoformat(node["updated_at"]),
+                        ))
+                return tags
+            except Exception as basic_err:
+                logger.error(f"Basic tag search also failed: {basic_err}")
+                raise
+
+    async def get_or_create_tag(self, name: str) -> Tag:
+        """Get an existing tag by name or create a new one.
+
+        Args:
+            name: Tag name.
+
+        Returns:
+            Existing or newly created Tag.
+        """
+        existing = await self.get_tag_by_name(name)
+        if existing:
+            return existing
+        return await self.create_tag(name)
