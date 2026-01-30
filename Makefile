@@ -4,7 +4,7 @@
 PYTHON ?= python3.11
 
 help:
-	@echo "EL Agent - Available commands:"
+	@echo "Eager Learner (EL) - Available commands:"
 	@echo ""
 	@echo "  make install    - Install dependencies with uv"
 	@echo "  make dev        - Install with dev dependencies"

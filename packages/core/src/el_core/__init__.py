@@ -8,6 +8,14 @@ from el_core.schemas import (
     Insight,
     Message,
     Session,
+    Tag,
+    TaggedItem,
+    TaggedItemType,
+    TagMergeRequest,
+    TagMergeResult,
+    TagStats,
+    TagSuggestion,
+    TagSuggestionResult,
 )
 
 __version__ = "2.0.0"
@@ -19,4 +27,12 @@ __all__ = [
     "Insight",
     "Message",
     "Session",
+    "Tag",
+    "TaggedItem",
+    "TaggedItemType",
+    "TagMergeRequest",
+    "TagMergeResult",
+    "TagStats",
+    "TagSuggestion",
+    "TagSuggestionResult",
 ]

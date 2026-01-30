@@ -1,4 +1,4 @@
-"""Tool definitions for EL Agent function calling."""
+"""Tool definitions for Eager Learner (EL) function calling."""
 
 from __future__ import annotations
 

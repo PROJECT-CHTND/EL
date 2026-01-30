@@ -1,4 +1,4 @@
-"""Evaluation metrics for EL Agent."""
+"""Evaluation metrics for Eager Learner."""
 
 from __future__ import annotations
 

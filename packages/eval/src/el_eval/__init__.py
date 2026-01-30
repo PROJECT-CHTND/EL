@@ -1,3 +1,3 @@
-"""EL Evaluation Framework - Test and evaluate the EL Agent."""
+"""EL Evaluation Framework - Test and evaluate Eager Learner."""
 
 __version__ = "1.0.0"

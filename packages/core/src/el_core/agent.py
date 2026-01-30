@@ -1,4 +1,4 @@
-"""EL Agent - LLM-native interview agent with knowledge graph integration."""
+"""Eager Learner (EL) - LLM-native interview agent with knowledge graph integration."""
 
 from __future__ import annotations
 
@@ -22,6 +22,9 @@ from el_core.schemas import (
     KnowledgeItem,
     Session,
     SessionSummary,
+    Tag,
+    TagSuggestion,
+    TagSuggestionResult,
     TopicSummary,
 )
 from el_core.stores.kg_store import KnowledgeGraphStore
@@ -285,7 +288,7 @@ def extract_dates_from_text(text: str) -> tuple[Any, Any]:
 
 
 class ELAgent:
-    """EL Agent - A curious and empathetic interviewer powered by LLM.
+    """Eager Learner (EL) - A curious and empathetic interviewer powered by LLM.
 
     This agent uses GPT-5.2 with function calling to:
     - Search knowledge graph for relevant context
@@ -299,7 +302,7 @@ class ELAgent:
         llm_client: LLMClient | None = None,
         kg_store: KnowledgeGraphStore | None = None,
     ) -> None:
-        """Initialize the EL Agent.
+        """Initialize the Eager Learner agent.
 
         Args:
             llm_client: LLM client for chat completions. Creates default if None.
@@ -1639,3 +1642,522 @@ Example:
                 fact_count=len(facts),
                 time_range=time_range,
             )
+
+    # ==================== Tag Suggestion Methods ====================
+
+    async def suggest_tags(
+        self,
+        content: str,
+        existing_tags: list[Tag] | None = None,
+        max_tags: int = 5,
+        language: str | None = None,
+    ) -> TagSuggestionResult:
+        """Suggest tags for given content using LLM.
+
+        Args:
+            content: Content to analyze for tags.
+            existing_tags: List of existing tags to consider for reuse.
+            max_tags: Maximum number of tags to suggest.
+            language: Language for prompts (auto-detect if None).
+
+        Returns:
+            TagSuggestionResult with suggested tags.
+        """
+        import json
+
+        if existing_tags is None:
+            existing_tags = await self._kg_store.get_all_tags(limit=100)
+
+        lang = language or detect_language(content)
+
+        # Format existing tags for the prompt
+        existing_tags_str = ""
+        if existing_tags:
+            tag_names = [f"- {t.name}" + (f" (別名: {', '.join(t.aliases[:3])})" if t.aliases else "") 
+                        for t in existing_tags[:50]]
+            existing_tags_str = "\n".join(tag_names)
+
+        if lang == "Japanese":
+            system_prompt = """あなたはコンテンツ分類の専門家です。
+与えられたテキストを分析し、適切なタグを提案してください。
+
+タグは以下の特徴を持つべきです：
+- 短く簡潔（1〜3語程度）
+- 内容の本質を捉えている
+- 検索やグルーピングに役立つ
+- 既存タグで適切なものがあれば優先的に再利用
+
+JSONフォーマットで出力してください：
+{
+  "tags": [
+    {"name": "タグ名", "relevance": 0.9, "reason": "このタグを選んだ理由", "is_existing": false}
+  ],
+  "content_summary": "コンテンツの簡潔な要約"
+}
+
+relevanceは0.0〜1.0で、コンテンツとの関連度を示します。
+is_existingは既存タグリストから選んだ場合true、新規提案の場合falseにしてください。"""
+
+            user_prompt = f"""以下のコンテンツに適切なタグを最大{max_tags}個提案してください。
+
+【コンテンツ】
+{content[:2000]}
+
+【既存タグ一覧】
+{existing_tags_str if existing_tags_str else "（まだタグがありません）"}
+
+適切な既存タグがあれば優先的に使用し、必要であれば新しいタグを提案してください。"""
+
+        else:
+            system_prompt = """You are a content classification expert.
+Analyze the given text and suggest appropriate tags.
+
+Tags should be:
+- Short and concise (1-3 words)
+- Capture the essence of the content
+- Useful for search and grouping
+- Reuse existing tags when appropriate
+
+Output in JSON format:
+{
+  "tags": [
+    {"name": "tag name", "relevance": 0.9, "reason": "why this tag", "is_existing": false}
+  ],
+  "content_summary": "brief summary of content"
+}
+
+relevance is 0.0-1.0 indicating how related the tag is to the content.
+is_existing should be true if selected from existing tags, false if newly suggested."""
+
+            user_prompt = f"""Suggest up to {max_tags} appropriate tags for the following content.
+
+【Content】
+{content[:2000]}
+
+【Existing Tags】
+{existing_tags_str if existing_tags_str else "(No tags yet)"}
+
+Prioritize existing tags when appropriate, and suggest new ones if needed."""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        try:
+            response = await self._llm.chat(messages=messages)  # type: ignore
+            result_content = response.content or "{}"
+
+            # Clean up response
+            result_content = result_content.strip()
+            if result_content.startswith("```"):
+                result_content = result_content.split("\n", 1)[-1]
+            if result_content.endswith("```"):
+                result_content = result_content.rsplit("```", 1)[0]
+            result_content = result_content.strip()
+
+            data = json.loads(result_content)
+
+            suggestions: list[TagSuggestion] = []
+            existing_matched = 0
+            new_suggested = 0
+
+            for tag_data in data.get("tags", [])[:max_tags]:
+                tag_name = tag_data.get("name", "").strip()
+                if not tag_name:
+                    continue
+
+                is_existing = tag_data.get("is_existing", False)
+                existing_tag_id = None
+
+                # Check if this matches an existing tag
+                if existing_tags:
+                    for existing_tag in existing_tags:
+                        if (existing_tag.name.lower() == tag_name.lower() or
+                            any(alias.lower() == tag_name.lower() for alias in existing_tag.aliases)):
+                            existing_tag_id = existing_tag.id
+                            is_existing = True
+                            tag_name = existing_tag.name  # Use canonical name
+                            break
+
+                if is_existing:
+                    existing_matched += 1
+                else:
+                    new_suggested += 1
+
+                suggestions.append(TagSuggestion(
+                    name=tag_name,
+                    relevance=min(1.0, max(0.0, tag_data.get("relevance", 0.8))),
+                    reason=tag_data.get("reason", ""),
+                    existing_tag_id=existing_tag_id,
+                    is_new=not is_existing,
+                ))
+
+            return TagSuggestionResult(
+                suggestions=suggestions,
+                content_summary=data.get("content_summary", ""),
+                existing_tags_matched=existing_matched,
+                new_tags_suggested=new_suggested,
+            )
+
+        except Exception as e:
+            logger.warning(f"Failed to suggest tags: {e}")
+            return TagSuggestionResult(
+                suggestions=[],
+                content_summary="",
+                existing_tags_matched=0,
+                new_tags_suggested=0,
+            )
+
+    async def check_similar_tags(
+        self,
+        new_tag_name: str,
+        existing_tags: list[Tag] | None = None,
+        language: str | None = None,
+    ) -> tuple[str | None, float]:
+        """Check if a new tag is similar to existing tags.
+
+        Args:
+            new_tag_name: Name of the potential new tag.
+            existing_tags: List of existing tags to compare.
+            language: Language for prompts (auto-detect if None).
+
+        Returns:
+            Tuple of (existing_tag_id_to_merge_into, similarity_score).
+            Returns (None, 0.0) if no similar tag found.
+        """
+        import json
+
+        if existing_tags is None:
+            existing_tags = await self._kg_store.get_all_tags(limit=100)
+
+        if not existing_tags:
+            return None, 0.0
+
+        lang = language or detect_language(new_tag_name)
+
+        tag_names_list = [f"{t.name} (ID: {t.id})" for t in existing_tags[:50]]
+        tag_names_str = "\n".join(tag_names_list)
+
+        if lang == "Japanese":
+            system_prompt = """あなたはタグの類似度判定の専門家です。
+新しいタグが既存タグと意味的に同じか判定してください。
+
+JSONフォーマットで出力：
+{
+  "is_similar": true/false,
+  "similar_tag_id": "類似タグのID（なければnull）",
+  "similarity_score": 0.9,
+  "reason": "判定理由"
+}
+
+similarity_scoreは0.0〜1.0で、0.8以上を「同義語」とみなします。
+例: 「旅行」と「トラベル」、「プログラミング」と「コーディング」は同義語です。"""
+
+            user_prompt = f"""新規タグ候補: 「{new_tag_name}」
+
+【既存タグ一覧】
+{tag_names_str}
+
+この新規タグは既存タグのいずれかと同義ですか？"""
+
+        else:
+            system_prompt = """You are an expert in tag similarity assessment.
+Determine if a new tag is semantically the same as existing tags.
+
+Output in JSON format:
+{
+  "is_similar": true/false,
+  "similar_tag_id": "ID of similar tag or null",
+  "similarity_score": 0.9,
+  "reason": "reason for judgment"
+}
+
+similarity_score is 0.0-1.0, with 0.8+ considered synonyms.
+Example: "travel" and "trip", "programming" and "coding" are synonyms."""
+
+            user_prompt = f"""New tag candidate: "{new_tag_name}"
+
+【Existing Tags】
+{tag_names_str}
+
+Is this new tag synonymous with any existing tag?"""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        try:
+            response = await self._llm.chat(messages=messages)  # type: ignore
+            result_content = response.content or "{}"
+
+            # Clean up response
+            result_content = result_content.strip()
+            if result_content.startswith("```"):
+                result_content = result_content.split("\n", 1)[-1]
+            if result_content.endswith("```"):
+                result_content = result_content.rsplit("```", 1)[0]
+            result_content = result_content.strip()
+
+            data = json.loads(result_content)
+
+            is_similar = data.get("is_similar", False)
+            similar_tag_id = data.get("similar_tag_id")
+            similarity_score = data.get("similarity_score", 0.0)
+
+            if is_similar and similar_tag_id and similarity_score >= 0.8:
+                # Verify the tag ID exists
+                for tag in existing_tags:
+                    if tag.id == similar_tag_id:
+                        logger.info(f"Tag '{new_tag_name}' is similar to '{tag.name}' (score: {similarity_score})")
+                        return similar_tag_id, similarity_score
+                # Tag ID not found, try to find by name match in reason
+                logger.warning(f"Similar tag ID '{similar_tag_id}' not found in existing tags")
+
+            return None, 0.0
+
+        except Exception as e:
+            logger.warning(f"Failed to check tag similarity: {e}")
+            return None, 0.0
+
+    async def auto_tag_content(
+        self,
+        content: str,
+        max_tags: int = 5,
+        min_relevance: float = 0.6,
+        language: str | None = None,
+    ) -> list[tuple[Tag, float]]:
+        """Automatically tag content by suggesting, checking similarity, and creating tags.
+
+        Args:
+            content: Content to tag.
+            max_tags: Maximum number of tags.
+            min_relevance: Minimum relevance score to include.
+            language: Language for prompts.
+
+        Returns:
+            List of (Tag, relevance) tuples for the created/matched tags.
+        """
+        # Get existing tags
+        existing_tags = await self._kg_store.get_all_tags(limit=100)
+
+        # Get tag suggestions
+        result = await self.suggest_tags(
+            content=content,
+            existing_tags=existing_tags,
+            max_tags=max_tags,
+            language=language,
+        )
+
+        tags_with_relevance: list[tuple[Tag, float]] = []
+
+        for suggestion in result.suggestions:
+            if suggestion.relevance < min_relevance:
+                continue
+
+            if suggestion.existing_tag_id:
+                # Use existing tag
+                tag = await self._kg_store.get_tag(suggestion.existing_tag_id)
+                if tag:
+                    tags_with_relevance.append((tag, suggestion.relevance))
+            else:
+                # Check for similar existing tags
+                similar_tag_id, similarity = await self.check_similar_tags(
+                    new_tag_name=suggestion.name,
+                    existing_tags=existing_tags,
+                    language=language,
+                )
+
+                if similar_tag_id and similarity >= 0.8:
+                    # Use similar existing tag
+                    tag = await self._kg_store.get_tag(similar_tag_id)
+                    if tag:
+                        # Add the suggested name as an alias if not already there
+                        if (suggestion.name.lower() != tag.name.lower() and
+                            suggestion.name.lower() not in [a.lower() for a in tag.aliases]):
+                            await self._kg_store.update_tag(
+                                tag.id,
+                                aliases=tag.aliases + [suggestion.name],
+                            )
+                            tag = await self._kg_store.get_tag(similar_tag_id)  # Refresh
+                        if tag:
+                            tags_with_relevance.append((tag, suggestion.relevance))
+                else:
+                    # Create new tag
+                    tag = await self._kg_store.create_tag(name=suggestion.name)
+                    tags_with_relevance.append((tag, suggestion.relevance))
+                    # Add to existing_tags for subsequent similarity checks
+                    existing_tags.append(tag)
+
+        return tags_with_relevance
+
+    async def auto_tag_insight(
+        self,
+        insight_id: str,
+        content: str,
+        max_tags: int = 3,
+        language: str | None = None,
+    ) -> list[tuple[Tag, float]]:
+        """Automatically tag an insight.
+
+        Args:
+            insight_id: ID of the insight to tag.
+            content: Content to analyze for tags (usually subject + predicate + object).
+            max_tags: Maximum number of tags.
+            language: Language for prompts.
+
+        Returns:
+            List of (Tag, relevance) tuples applied to the insight.
+        """
+        tags_with_relevance = await self.auto_tag_content(
+            content=content,
+            max_tags=max_tags,
+            language=language,
+        )
+
+        for tag, relevance in tags_with_relevance:
+            await self._kg_store.tag_insight(insight_id, tag.id, relevance)
+
+        logger.info(f"Auto-tagged insight {insight_id} with {len(tags_with_relevance)} tags")
+        return tags_with_relevance
+
+    async def auto_tag_document(
+        self,
+        document_id: str,
+        content: str,
+        max_tags: int = 5,
+        language: str | None = None,
+    ) -> list[tuple[Tag, float]]:
+        """Automatically tag a document.
+
+        Args:
+            document_id: ID of the document to tag.
+            content: Content to analyze for tags (usually summary + extracted facts).
+            max_tags: Maximum number of tags.
+            language: Language for prompts.
+
+        Returns:
+            List of (Tag, relevance) tuples applied to the document.
+        """
+        tags_with_relevance = await self.auto_tag_content(
+            content=content,
+            max_tags=max_tags,
+            language=language,
+        )
+
+        for tag, relevance in tags_with_relevance:
+            await self._kg_store.tag_document(document_id, tag.id, relevance)
+
+        logger.info(f"Auto-tagged document {document_id} with {len(tags_with_relevance)} tags")
+        return tags_with_relevance
+
+    async def auto_tag_insights_batch(
+        self,
+        insights: list[dict[str, str]],
+        max_tags_per_insight: int = 2,
+        language: str | None = None,
+    ) -> dict[str, list[tuple[Tag, float]]]:
+        """Automatically tag multiple insights in a single LLM call.
+
+        Args:
+            insights: List of dicts with 'id', 'subject', 'predicate', 'object' keys.
+            max_tags_per_insight: Maximum tags per insight.
+            language: Language for prompts.
+
+        Returns:
+            Dict mapping insight_id to list of (Tag, relevance) tuples.
+        """
+        if not insights:
+            return {}
+
+        lang = language or "ja"  # Default to Japanese
+
+        # Build batch prompt
+        insights_text = "\n".join([
+            f"[{i+1}] {ins['subject']} {ins['predicate']} {ins['object']}"
+            for i, ins in enumerate(insights)
+        ])
+
+        prompt = f"""以下の複数のファクトに対して、それぞれ最大{max_tags_per_insight}個のタグを提案してください。
+
+ファクト一覧:
+{insights_text}
+
+回答形式（JSON配列）:
+[
+  {{"index": 1, "tags": [{{"name": "タグ名", "relevance": 0.9}}, ...]}},
+  ...
+]
+
+ルール:
+- タグは短く（1-3語）、具体的に
+- 関連度(relevance)は0.5-1.0の範囲
+- 類似した概念は同じタグ名を使用
+- 日本語のファクトには日本語タグ、英語には英語タグ"""
+
+        try:
+            response = await self._llm.chat(
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            import json
+            import re
+
+            # Parse response
+            content = response.content or ""
+            content = content.strip()
+            # Extract JSON array from response
+            match = re.search(r'\[[\s\S]*\]', content)
+            if not match:
+                logger.warning(f"Failed to find JSON array in LLM response")
+                return {}
+
+            results = json.loads(match.group())
+            
+            # Process results
+            tagged_insights: dict[str, list[tuple[Tag, float]]] = {}
+            
+            for result in results:
+                idx = result.get("index", 0) - 1
+                if idx < 0 or idx >= len(insights):
+                    continue
+                    
+                insight_id = insights[idx]["id"]
+                insight_tags: list[tuple[Tag, float]] = []
+                
+                for tag_info in result.get("tags", [])[:max_tags_per_insight]:
+                    tag_name = tag_info.get("name", "").strip()
+                    relevance = min(1.0, max(0.5, float(tag_info.get("relevance", 0.8))))
+                    
+                    if not tag_name:
+                        continue
+                    
+                    try:
+                        # Get or create tag
+                        tag = await self._kg_store.get_or_create_tag(tag_name)
+                        
+                        # Check for similar tags and merge if needed
+                        try:
+                            similar = await self._kg_store.find_similar_tags(tag_name, threshold=0.85, limit=1)
+                            if similar and similar[0][0].id != tag.id:
+                                tag = similar[0][0]
+                        except Exception:
+                            pass  # Use the created tag if similarity check fails
+                        
+                        # Tag the insight
+                        await self._kg_store.tag_insight(insight_id, tag.id, relevance)
+                        insight_tags.append((tag, relevance))
+                    except Exception as tag_err:
+                        logger.warning(f"Failed to apply tag {tag_name}: {tag_err}")
+                
+                if insight_tags:
+                    tagged_insights[insight_id] = insight_tags
+            
+            total_tags = sum(len(tags) for tags in tagged_insights.values())
+            logger.info(f"Batch-tagged {len(tagged_insights)} insights with {total_tags} total tags")
+            return tagged_insights
+
+        except Exception as e:
+            logger.error(f"Failed to batch tag insights: {e}")
+            return {}

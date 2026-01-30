@@ -20,7 +20,21 @@ from pydantic import BaseModel
 
 from el_core import ELAgent
 from el_core.document_parser import DocumentParser, truncate_content, chunk_document
-from el_core.schemas import Document, DocumentChunk, DocumentStatus, TopicSummary, KnowledgeStats
+from el_core.schemas import (
+    Document,
+    DocumentChunk,
+    DocumentStatus,
+    KnowledgeStats,
+    Tag,
+    TaggedItem,
+    TaggedItemType,
+    TagMergeRequest,
+    TagMergeResult,
+    TagStats,
+    TagSuggestion,
+    TagSuggestionResult,
+    TopicSummary,
+)
 from el_core.llm.client import LLMClient
 from el_core.stores.kg_store import KnowledgeGraphStore
 
@@ -753,6 +767,7 @@ async def process_document_background(
                     # Link insight to its source chunk for accurate reference
                     await kg_store.link_insight_to_chunk(fact_id, chunk.id)
                     all_facts.append({
+                        "id": fact_id,
                         "subject": fact.subject,
                         "predicate": fact.predicate,
                         "object": fact.object,
@@ -795,6 +810,51 @@ async def process_document_background(
                 "domain": detected_domain.value,
             },
         )
+
+        # Auto-tag the document based on its content
+        try:
+            # Build tagging content from summary, topics, entities and sample facts
+            tag_content_parts = [overall_summary]
+            if all_topics:
+                tag_content_parts.append(f"トピック: {', '.join(list(all_topics)[:10])}")
+            if all_entities:
+                tag_content_parts.append(f"エンティティ: {', '.join(list(all_entities)[:10])}")
+            if all_facts:
+                sample_facts = [f"{f['subject']} {f['predicate']} {f['object']}" for f in all_facts[:5]]
+                tag_content_parts.append(f"サンプルファクト: {'; '.join(sample_facts)}")
+            
+            tag_content = "\n".join(tag_content_parts)
+            
+            # Auto-tag the document
+            tags_applied = await agent.auto_tag_document(
+                document_id=document_id,
+                content=tag_content,
+                max_tags=5,
+            )
+            
+            if tags_applied:
+                tag_names = [tag.name for tag, _ in tags_applied]
+                logger.info(f"Auto-tagged document {document_id} with: {tag_names}")
+        except Exception as tag_error:
+            logger.warning(f"Failed to auto-tag document {document_id}: {tag_error}")
+
+        # Auto-tag extracted facts using LLM (batch processing)
+        if all_facts:
+            try:
+                # Process in batches of 10 facts
+                batch_size = 10
+                total_fact_tags = 0
+                for i in range(0, len(all_facts), batch_size):
+                    batch = all_facts[i:i + batch_size]
+                    tagged = await agent.auto_tag_insights_batch(
+                        insights=batch,
+                        max_tags_per_insight=2,
+                    )
+                    total_fact_tags += sum(len(tags) for tags in tagged.values())
+                
+                logger.info(f"Auto-tagged {len(all_facts)} facts with {total_fact_tags} total tags")
+            except Exception as fact_tag_error:
+                logger.warning(f"Failed to auto-tag facts for document {document_id}: {fact_tag_error}")
 
         logger.info(f"Document {document_id} processed: {len(chunks)} chunks, {len(all_facts)} facts extracted")
 
@@ -1437,6 +1497,599 @@ async def summarize_entity(entity: str):
     except Exception as e:
         logger.error(f"Failed to summarize entity: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate entity summary")
+
+
+# ==================== Tag API Endpoints ====================
+
+
+class CreateTagRequest(BaseModel):
+    """Request to create a new tag."""
+    name: str
+    color: str | None = None
+    description: str = ""
+
+
+class UpdateTagRequest(BaseModel):
+    """Request to update a tag."""
+    name: str | None = None
+    color: str | None = None
+    description: str | None = None
+    aliases: list[str] | None = None
+
+
+class TagItemRequest(BaseModel):
+    """Request to tag an item."""
+    tag_id: str
+    relevance: float = 0.8
+
+
+class TagSuggestRequest(BaseModel):
+    """Request for tag suggestions."""
+    content: str
+    max_tags: int = 5
+
+
+class MergeTagsRequest(BaseModel):
+    """Request to merge tags."""
+    source_tag_ids: list[str]
+    target_tag_id: str
+    add_as_aliases: bool = True
+
+
+class TagResponse(BaseModel):
+    """Response for a single tag."""
+    id: str
+    name: str
+    aliases: list[str]
+    color: str | None
+    description: str
+    usage_count: int
+    created_at: str
+    updated_at: str
+
+
+class TagStatsResponse(BaseModel):
+    """Response for tag statistics."""
+    id: str
+    name: str
+    aliases: list[str]
+    color: str | None
+    insight_count: int
+    document_count: int
+    total_count: int
+    avg_relevance: float
+    last_used: str | None
+    created_at: str
+
+
+class TaggedItemResponse(BaseModel):
+    """Response for a tagged item."""
+    item_id: str
+    item_type: str
+    relevance: float
+    title: str
+    summary: str
+    created_at: str | None
+    subject: str | None = None
+    predicate: str | None = None
+    object: str | None = None
+    filename: str | None = None
+
+
+class TagSuggestionResponse(BaseModel):
+    """Response for a tag suggestion."""
+    name: str
+    relevance: float
+    reason: str
+    existing_tag_id: str | None
+    is_new: bool
+
+
+class TagSuggestionsResponse(BaseModel):
+    """Response for tag suggestions."""
+    suggestions: list[TagSuggestionResponse]
+    content_summary: str
+    existing_tags_matched: int
+    new_tags_suggested: int
+
+
+class TagMergeResultResponse(BaseModel):
+    """Response for tag merge operation."""
+    target_tag: TagResponse
+    merged_count: int
+    items_updated: int
+    aliases_added: list[str]
+
+
+def _tag_to_response(tag: Tag) -> TagResponse:
+    """Convert Tag to TagResponse."""
+    return TagResponse(
+        id=tag.id,
+        name=tag.name,
+        aliases=tag.aliases,
+        color=tag.color,
+        description=tag.description,
+        usage_count=tag.usage_count,
+        created_at=tag.created_at.isoformat(),
+        updated_at=tag.updated_at.isoformat(),
+    )
+
+
+def _tag_stats_to_response(stats: TagStats) -> TagStatsResponse:
+    """Convert TagStats to TagStatsResponse."""
+    return TagStatsResponse(
+        id=stats.id,
+        name=stats.name,
+        aliases=stats.aliases,
+        color=stats.color,
+        insight_count=stats.insight_count,
+        document_count=stats.document_count,
+        total_count=stats.total_count,
+        avg_relevance=stats.avg_relevance,
+        last_used=stats.last_used.isoformat() if stats.last_used else None,
+        created_at=stats.created_at.isoformat(),
+    )
+
+
+def _tagged_item_to_response(item: TaggedItem) -> TaggedItemResponse:
+    """Convert TaggedItem to TaggedItemResponse."""
+    return TaggedItemResponse(
+        item_id=item.item_id,
+        item_type=item.item_type.value,
+        relevance=item.relevance,
+        title=item.title,
+        summary=item.summary,
+        created_at=item.created_at.isoformat() if item.created_at else None,
+        subject=item.subject,
+        predicate=item.predicate,
+        object=item.object,
+        filename=item.filename,
+    )
+
+
+@app.get("/api/tags", tags=["tags"])
+async def list_tags(limit: int = 100) -> list[TagStatsResponse]:
+    """Get all tags with statistics, ordered by usage count."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        stats = await kg_store.get_all_tag_stats(limit=limit)
+        return [_tag_stats_to_response(s) for s in stats]
+    except Exception as e:
+        logger.error(f"Failed to list tags: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list tags")
+
+
+@app.post("/api/tags", tags=["tags"])
+async def create_tag(request: CreateTagRequest) -> TagResponse:
+    """Create a new tag."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        # Check if tag already exists
+        existing = await kg_store.get_tag_by_name(request.name)
+        if existing:
+            raise HTTPException(status_code=409, detail=f"Tag '{request.name}' already exists")
+
+        tag = await kg_store.create_tag(
+            name=request.name,
+            color=request.color,
+            description=request.description,
+        )
+        return _tag_to_response(tag)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to create tag: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create tag")
+
+
+# NOTE: These endpoints must be defined BEFORE /api/tags/{tag_id} to avoid routing conflicts
+@app.get("/api/tags/search", tags=["tags"])
+async def search_tags(query: str, limit: int = 10) -> list[TagResponse]:
+    """Search tags by name or alias."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        tags = await kg_store.search_tags(query, limit=limit)
+        return [_tag_to_response(tag) for tag in tags]
+    except Exception as e:
+        logger.error(f"Failed to search tags: {e}")
+        raise HTTPException(status_code=500, detail="Failed to search tags")
+
+
+@app.post("/api/tags/suggest", tags=["tags"])
+async def suggest_tags_endpoint(request: TagSuggestRequest) -> TagSuggestionsResponse:
+    """Suggest tags for given content using LLM."""
+    if agent is None:
+        raise HTTPException(status_code=503, detail="Agent not available")
+
+    try:
+        result = await agent.suggest_tags(
+            content=request.content,
+            max_tags=request.max_tags,
+        )
+
+        return TagSuggestionsResponse(
+            suggestions=[
+                TagSuggestionResponse(
+                    name=s.name,
+                    relevance=s.relevance,
+                    reason=s.reason,
+                    existing_tag_id=s.existing_tag_id,
+                    is_new=s.is_new,
+                )
+                for s in result.suggestions
+            ],
+            content_summary=result.content_summary,
+            existing_tags_matched=result.existing_tags_matched,
+            new_tags_suggested=result.new_tags_suggested,
+        )
+    except Exception as e:
+        logger.error(f"Failed to suggest tags: {e}")
+        raise HTTPException(status_code=500, detail="Failed to suggest tags")
+
+
+@app.post("/api/tags/merge", tags=["tags"])
+async def merge_tags_endpoint(request: MergeTagsRequest) -> TagMergeResultResponse:
+    """Merge multiple tags into one."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        tag, items_updated = await kg_store.merge_tags(
+            source_tag_ids=request.source_tag_ids,
+            target_tag_id=request.target_tag_id,
+            add_as_aliases=request.add_as_aliases,
+        )
+
+        if tag is None:
+            raise HTTPException(status_code=404, detail="Target tag not found")
+
+        return TagMergeResultResponse(
+            target_tag=_tag_to_response(tag),
+            merged_count=len(request.source_tag_ids),
+            items_updated=items_updated,
+            aliases_added=[],
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to merge tags: {e}")
+        raise HTTPException(status_code=500, detail="Failed to merge tags")
+
+
+@app.get("/api/tags/{tag_id}", tags=["tags"])
+async def get_tag(tag_id: str) -> TagStatsResponse:
+    """Get a tag by ID with statistics."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        stats = await kg_store.get_tag_stats(tag_id)
+        if stats is None:
+            raise HTTPException(status_code=404, detail="Tag not found")
+        return _tag_stats_to_response(stats)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get tag: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get tag")
+
+
+@app.put("/api/tags/{tag_id}", tags=["tags"])
+async def update_tag(tag_id: str, request: UpdateTagRequest) -> TagResponse:
+    """Update a tag."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        tag = await kg_store.update_tag(
+            tag_id=tag_id,
+            name=request.name,
+            color=request.color,
+            description=request.description,
+            aliases=request.aliases,
+        )
+        if tag is None:
+            raise HTTPException(status_code=404, detail="Tag not found")
+        return _tag_to_response(tag)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update tag: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update tag")
+
+
+@app.delete("/api/tags/{tag_id}", tags=["tags"])
+async def delete_tag(tag_id: str) -> dict[str, bool]:
+    """Delete a tag."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        deleted = await kg_store.delete_tag(tag_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Tag not found")
+        return {"deleted": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete tag: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete tag")
+
+
+@app.get("/api/tags/{tag_id}/items", tags=["tags"])
+async def get_tagged_items(
+    tag_id: str,
+    item_type: str | None = None,
+    limit: int = 50,
+) -> list[TaggedItemResponse]:
+    """Get items tagged with a specific tag."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        # Parse item type
+        parsed_type: TaggedItemType | None = None
+        if item_type:
+            try:
+                parsed_type = TaggedItemType(item_type)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid item_type. Must be one of: {[t.value for t in TaggedItemType]}"
+                )
+
+        items = await kg_store.get_items_by_tag(tag_id, item_type=parsed_type, limit=limit)
+        return [_tagged_item_to_response(item) for item in items]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get tagged items: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get tagged items")
+
+
+@app.post("/api/insights/{insight_id}/tags", tags=["tags"])
+async def tag_insight(insight_id: str, request: TagItemRequest) -> dict[str, str]:
+    """Add a tag to an insight."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        await kg_store.tag_insight(
+            insight_id=insight_id,
+            tag_id=request.tag_id,
+            relevance=request.relevance,
+        )
+        return {"status": "tagged", "insight_id": insight_id, "tag_id": request.tag_id}
+    except Exception as e:
+        logger.error(f"Failed to tag insight: {e}")
+        raise HTTPException(status_code=500, detail="Failed to tag insight")
+
+
+@app.delete("/api/insights/{insight_id}/tags/{tag_id}", tags=["tags"])
+async def untag_insight(insight_id: str, tag_id: str) -> dict[str, bool]:
+    """Remove a tag from an insight."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        removed = await kg_store.untag_insight(insight_id, tag_id)
+        return {"removed": removed}
+    except Exception as e:
+        logger.error(f"Failed to untag insight: {e}")
+        raise HTTPException(status_code=500, detail="Failed to untag insight")
+
+
+@app.get("/api/insights/{insight_id}/tags", tags=["tags"])
+async def get_insight_tags(insight_id: str) -> list[dict[str, Any]]:
+    """Get all tags for an insight."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        tags_with_relevance = await kg_store.get_tags_for_insight(insight_id)
+        return [
+            {
+                "tag": _tag_to_response(tag).model_dump(),
+                "relevance": relevance,
+            }
+            for tag, relevance in tags_with_relevance
+        ]
+    except Exception as e:
+        logger.error(f"Failed to get insight tags: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get insight tags")
+
+
+@app.post("/api/documents/{document_id}/tags", tags=["tags"])
+async def tag_document(document_id: str, request: TagItemRequest) -> dict[str, str]:
+    """Add a tag to a document."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        await kg_store.tag_document(
+            document_id=document_id,
+            tag_id=request.tag_id,
+            relevance=request.relevance,
+        )
+        return {"status": "tagged", "document_id": document_id, "tag_id": request.tag_id}
+    except Exception as e:
+        logger.error(f"Failed to tag document: {e}")
+        raise HTTPException(status_code=500, detail="Failed to tag document")
+
+
+@app.delete("/api/documents/{document_id}/tags/{tag_id}", tags=["tags"])
+async def untag_document(document_id: str, tag_id: str) -> dict[str, bool]:
+    """Remove a tag from a document."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        removed = await kg_store.untag_document(document_id, tag_id)
+        return {"removed": removed}
+    except Exception as e:
+        logger.error(f"Failed to untag document: {e}")
+        raise HTTPException(status_code=500, detail="Failed to untag document")
+
+
+@app.get("/api/documents/{document_id}/tags", tags=["tags"])
+async def get_document_tags(document_id: str) -> list[dict[str, Any]]:
+    """Get all tags for a document."""
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        tags_with_relevance = await kg_store.get_tags_for_document(document_id)
+        return [
+            {
+                "tag": _tag_to_response(tag).model_dump(),
+                "relevance": relevance,
+            }
+            for tag, relevance in tags_with_relevance
+        ]
+    except Exception as e:
+        logger.error(f"Failed to get document tags: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get document tags")
+
+
+@app.post("/api/documents/{document_id}/tags/refresh", tags=["tags"])
+async def refresh_document_tags(
+    document_id: str, 
+    clear_existing: bool = True
+) -> dict[str, Any]:
+    """Re-generate and assign tags for a document using LLM.
+    
+    Args:
+        document_id: Document ID
+        clear_existing: If True, remove existing tags before re-tagging (default: True)
+    """
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+    if agent is None:
+        raise HTTPException(status_code=503, detail="Agent not available")
+
+    try:
+        # Get document info
+        doc = await kg_store.get_document(document_id)
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Get document content from chunks or summary
+        content = ""
+        chunks = await kg_store.get_chunks_by_document(document_id)
+        if chunks:
+            # Use chunk contents
+            content = "\n\n".join([c.content for c in chunks[:10]])  # Limit to first 10 chunks
+        elif doc.extracted_summary:
+            # Fall back to extracted summary
+            content = doc.extracted_summary
+        
+        if not content:
+            raise HTTPException(status_code=400, detail="No content available for tagging")
+        
+        # Clear existing tags if requested
+        if clear_existing:
+            existing_tags = await kg_store.get_tags_for_document(document_id)
+            for tag, _ in existing_tags:
+                await kg_store.untag_document(document_id, tag.id)
+        
+        # Re-generate tags using LLM
+        assigned_tags = await agent.auto_tag_document(document_id, content)
+        
+        logger.info(f"Refreshed tags for document {document_id}: {len(assigned_tags)} tags assigned")
+        
+        return {
+            "status": "refreshed",
+            "document_id": document_id,
+            "tags_assigned": len(assigned_tags),
+            "tags": [{"id": tag.id, "name": tag.name, "relevance": relevance} for tag, relevance in assigned_tags]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to refresh document tags: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to refresh document tags: {str(e)}")
+
+
+@app.post("/api/documents/{document_id}/facts/tags/refresh", tags=["tags"])
+async def refresh_document_facts_tags(
+    document_id: str,
+    clear_existing: bool = True
+) -> dict[str, Any]:
+    """Re-generate and assign tags for all facts in a document using LLM.
+    
+    Args:
+        document_id: Document ID
+        clear_existing: If True, remove existing tags before re-tagging (default: True)
+    """
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+    if agent is None:
+        raise HTTPException(status_code=503, detail="Agent not available")
+
+    try:
+        # Get document's linked facts
+        facts = await kg_store.get_insights_for_document(document_id)
+        if not facts:
+            return {
+                "status": "no_facts",
+                "document_id": document_id,
+                "facts_tagged": 0,
+                "total_tags": 0,
+            }
+        
+        # Clear existing tags if requested
+        if clear_existing:
+            for fact in facts:
+                existing_tags = await kg_store.get_tags_for_insight(fact.id)
+                for tag, _ in existing_tags:
+                    await kg_store.untag_insight(fact.id, tag.id)
+        
+        # Prepare facts for batch tagging
+        facts_data = [
+            {
+                "id": fact.id,
+                "subject": fact.subject,
+                "predicate": fact.predicate,
+                "object": fact.object,
+            }
+            for fact in facts
+        ]
+        
+        # Batch tag facts
+        batch_size = 10
+        all_tagged: dict[str, Any] = {}
+        for i in range(0, len(facts_data), batch_size):
+            batch = facts_data[i:i + batch_size]
+            try:
+                tagged = await agent.auto_tag_insights_batch(
+                    insights=batch,
+                    max_tags_per_insight=2,
+                )
+                all_tagged.update(tagged)
+            except Exception as batch_error:
+                logger.warning(f"Batch tagging failed: {batch_error}")
+        
+        total_tags = sum(len(tags) for tags in all_tagged.values())
+        
+        logger.info(f"Refreshed tags for {len(facts)} facts in document {document_id}: {total_tags} tags assigned")
+        
+        return {
+            "status": "refreshed",
+            "document_id": document_id,
+            "facts_tagged": len(all_tagged),
+            "total_tags": total_tags,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to refresh facts tags: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to refresh facts tags: {str(e)}")
 
 
 # Serve static files (Web UI)

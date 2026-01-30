@@ -1,4 +1,4 @@
-"""Test runner for EL Agent evaluation."""
+"""Test runner for Eager Learner evaluation."""
 
 from __future__ import annotations
 
