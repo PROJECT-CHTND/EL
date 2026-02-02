@@ -1406,12 +1406,14 @@
                 
                 // Tags for this document (will be loaded asynchronously)
                 const tagPlaceholder = doc.status === 'completed' ? `
-                    <div class="flex items-center gap-1 mt-1.5">
-                        <div class="doc-tags flex-1 flex flex-wrap gap-1" data-doc-id="${doc.id}"></div>
-                        <div class="flex gap-1">
-                            <button onclick="refreshDocumentTags('${doc.id}')" class="text-[9px] text-slate-500 hover:text-emerald-400 transition-colors" title="ドキュメントタグを再生成">🏷️</button>
-                            <button onclick="refreshFactsTags('${doc.id}')" class="text-[9px] text-slate-500 hover:text-purple-400 transition-colors" title="Factsタグを再生成">📊</button>
-                        </div>
+                    <div class="doc-tags flex flex-wrap gap-1 mt-1.5" data-doc-id="${doc.id}"></div>
+                    <div class="flex gap-2 mt-2 pt-2 border-t border-white/5">
+                        <button onclick="refreshDocumentTags('${doc.id}')" class="flex-1 text-[10px] text-slate-400 hover:text-emerald-400 hover:bg-emerald-400/10 py-1 px-2 rounded transition-colors">
+                            🏷️ タグ再生成
+                        </button>
+                        <button onclick="refreshFactsTags('${doc.id}')" class="flex-1 text-[10px] text-slate-400 hover:text-purple-400 hover:bg-purple-400/10 py-1 px-2 rounded transition-colors">
+                            📊 Facts分析
+                        </button>
                     </div>` : '';
                 
                 return `
