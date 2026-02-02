@@ -841,6 +841,10 @@ async def process_document_background(
         # Auto-tag extracted facts using LLM (batch processing)
         if all_facts:
             try:
+                # Get existing tags for consistency
+                all_tags = await kg_store.get_all_tag_stats()
+                existing_tag_names = [t.name for t in sorted(all_tags, key=lambda x: -x.total_count)[:50]]
+                
                 # Process in batches of 10 facts
                 batch_size = 10
                 total_fact_tags = 0
@@ -849,8 +853,14 @@ async def process_document_background(
                     tagged = await agent.auto_tag_insights_batch(
                         insights=batch,
                         max_tags_per_insight=2,
+                        existing_tags=existing_tag_names,
                     )
                     total_fact_tags += sum(len(tags) for tags in tagged.values())
+                    # Update existing tags list
+                    for tag_list in tagged.values():
+                        for tag, _ in tag_list:
+                            if tag.name not in existing_tag_names:
+                                existing_tag_names.append(tag.name)
                 
                 logger.info(f"Auto-tagged {len(all_facts)} facts with {total_fact_tags} total tags")
             except Exception as fact_tag_error:
@@ -2061,6 +2071,10 @@ async def refresh_document_facts_tags(
             for fact in facts
         ]
         
+        # Get existing tags for consistency
+        all_tags = await kg_store.get_all_tag_stats()
+        existing_tag_names = [t.name for t in sorted(all_tags, key=lambda x: -x.total_count)[:50]]
+        
         # Batch tag facts
         batch_size = 10
         all_tagged: dict[str, Any] = {}
@@ -2070,8 +2084,14 @@ async def refresh_document_facts_tags(
                 tagged = await agent.auto_tag_insights_batch(
                     insights=batch,
                     max_tags_per_insight=2,
+                    existing_tags=existing_tag_names,
                 )
                 all_tagged.update(tagged)
+                # Update existing tags list with newly created tags
+                for tag_list in tagged.values():
+                    for tag, _ in tag_list:
+                        if tag.name not in existing_tag_names:
+                            existing_tag_names.append(tag.name)
             except Exception as batch_error:
                 logger.warning(f"Batch tagging failed: {batch_error}")
         

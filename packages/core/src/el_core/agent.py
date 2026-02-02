@@ -2057,6 +2057,7 @@ Is this new tag synonymous with any existing tag?"""
         insights: list[dict[str, str]],
         max_tags_per_insight: int = 2,
         language: str | None = None,
+        existing_tags: list[str] | None = None,
     ) -> dict[str, list[tuple[Tag, float]]]:
         """Automatically tag multiple insights in a single LLM call.
 
@@ -2064,6 +2065,7 @@ Is this new tag synonymous with any existing tag?"""
             insights: List of dicts with 'id', 'subject', 'predicate', 'object' keys.
             max_tags_per_insight: Maximum tags per insight.
             language: Language for prompts.
+            existing_tags: List of existing tag names to prefer for consistency.
 
         Returns:
             Dict mapping insight_id to list of (Tag, relevance) tuples.
@@ -2079,22 +2081,41 @@ Is this new tag synonymous with any existing tag?"""
             for i, ins in enumerate(insights)
         ])
 
-        prompt = f"""以下の複数のファクトに対して、それぞれ最大{max_tags_per_insight}個のタグを提案してください。
+        # Get existing tags for consistency
+        existing_tags_text = ""
+        if existing_tags:
+            existing_tags_text = f"\n既存タグ（優先的に使用）: {', '.join(existing_tags[:30])}\n"
+
+        prompt = f"""以下のファクトに対して、**抽象的なカテゴリタグ**を付与してください。
 
 ファクト一覧:
 {insights_text}
+{existing_tags_text}
+## タグ付けのルール
 
-回答形式（JSON配列）:
+1. **抽象度を上げる**: 具体的すぎるタグは避ける
+   - ❌ 悪い例: 「経過5日」「経過7日」「左かかと」「右かかと」
+   - ✅ 良い例: 「経過観察」「かかと」「足」
+
+2. **カテゴリとして機能するタグ**: 複数のファクトをグループ化できるもの
+   - ❌ 悪い例: 「ストレッチ未実施」「ストレッチ内容」「ストレッチメニュー」
+   - ✅ 良い例: 「ストレッチ」「運動」「トレーニング」
+
+3. **タグの種類**:
+   - テーマ: 健康, 仕事, 趣味, 家計, 日常
+   - 活動: 運動, 食事, 通院, 勉強
+   - 状態: 体調, 気分, 進捗
+   - 身体部位: 腰, 足, 肩 （左右は区別しない）
+
+4. **既存タグを優先**: 類似の既存タグがあれば新規作成せず再利用
+
+## 回答形式（JSON配列）:
 [
-  {{"index": 1, "tags": [{{"name": "タグ名", "relevance": 0.9}}, ...]}},
+  {{"index": 1, "tags": [{{"name": "タグ名", "relevance": 0.9}}]}},
   ...
 ]
 
-ルール:
-- タグは短く（1-3語）、具体的に
-- 関連度(relevance)は0.5-1.0の範囲
-- 類似した概念は同じタグ名を使用
-- 日本語のファクトには日本語タグ、英語には英語タグ"""
+関連度(relevance)は0.7-1.0の範囲で、そのタグがファクトをどれだけ代表するかを示す。"""
 
         try:
             response = await self._llm.chat(
