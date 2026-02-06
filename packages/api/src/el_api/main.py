@@ -980,11 +980,17 @@ async def process_document_background(
                 if extraction.domain != Domain.GENERAL:
                     detected_domain = extraction.domain
                 
-                if extraction.summary:
+                # Only add meaningful summaries (skip placeholder defaults)
+                if extraction.summary and extraction.summary not in ("ドキュメントの要約", ""):
                     summaries.append(extraction.summary)
+
+                logger.info(
+                    f"Chunk {chunk.chunk_index + 1}/{len(chunks)} of {filename}: "
+                    f"{len(extraction.facts)} facts extracted, summary='{extraction.summary[:50]}...'"
+                )
                     
             except Exception as chunk_error:
-                logger.warning(f"Failed to process chunk {chunk.chunk_index} of {filename}: {chunk_error}")
+                logger.warning(f"Failed to process chunk {chunk.chunk_index} of {filename}: {chunk_error}", exc_info=True)
                 continue
         
         # Generate overall summary
@@ -2097,7 +2103,7 @@ class KnowledgeGraphDataResponse(BaseModel):
 @app.get("/api/knowledge-graph", tags=["knowledge-graph"])
 async def get_knowledge_graph(
     min_usage: int = 0,
-    limit: int = 100,
+    limit: int = 500,
 ) -> KnowledgeGraphDataResponse:
     """Get knowledge graph data for visualization.
 
@@ -2510,6 +2516,198 @@ async def refresh_document_tags(
     except Exception as e:
         logger.error(f"Failed to refresh document tags: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to refresh document tags: {str(e)}")
+
+
+@app.post("/api/documents/{document_id}/facts/extract", tags=["documents"])
+async def extract_document_facts(
+    document_id: str,
+) -> dict[str, Any]:
+    """Extract (or re-extract) facts from a document using LLM.
+    
+    This reads the document's stored chunks and runs LLM extraction on each chunk.
+    If facts already exist for this document, they are deleted and re-extracted.
+    After extraction, facts are automatically tagged.
+    
+    Args:
+        document_id: Document ID
+    """
+    import uuid
+    from datetime import datetime
+    from el_core.schemas import Insight, Domain
+
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+    if agent is None:
+        raise HTTPException(status_code=503, detail="Agent not available")
+
+    try:
+        # Verify document exists
+        document = await kg_store.get_document(document_id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        # Get document chunks
+        chunks = await kg_store.get_chunks_by_document(document_id)
+        if not chunks:
+            raise HTTPException(
+                status_code=400, 
+                detail="ドキュメントのチャンクが見つかりません。ドキュメントを再アップロードしてください。"
+            )
+
+        # Delete existing facts for this document (re-extraction)
+        deleted_count = await kg_store.delete_document_insights(document_id)
+        if deleted_count > 0:
+            logger.info(f"Deleted {deleted_count} existing facts for document {document_id} before re-extraction")
+
+        # Process each chunk and extract facts
+        all_facts: list[dict] = []
+        all_topics: set[str] = set()
+        all_entities: set[str] = set()
+        detected_domain = Domain.GENERAL
+        summaries: list[str] = []
+        extraction_errors: list[str] = []
+
+        for chunk in chunks:
+            chunk_content = truncate_content(chunk.content, max_chars=50000)
+
+            try:
+                extraction = await agent.extract_from_document(
+                    chunk_content,
+                    f"{document.filename} (chunk {chunk.chunk_index + 1}/{len(chunks)})"
+                )
+
+                logger.info(
+                    f"Chunk {chunk.chunk_index + 1}/{len(chunks)} of {document.filename}: "
+                    f"extracted {len(extraction.facts)} facts, summary='{extraction.summary[:50]}...'"
+                )
+
+                for fact in extraction.facts:
+                    event_date = fact.event_date or chunk.chunk_date
+
+                    insight = Insight(
+                        subject=fact.subject,
+                        predicate=fact.predicate,
+                        object=fact.object,
+                        confidence=fact.confidence,
+                        domain=extraction.domain,
+                        event_date=event_date,
+                        event_date_end=fact.event_date_end or chunk.chunk_date_end,
+                        date_type=fact.date_type,
+                    )
+                    fact_id = await kg_store.save_insight(insight)
+                    await kg_store.link_fact_to_document(fact_id, document_id)
+                    await kg_store.link_insight_to_chunk(fact_id, chunk.id)
+                    all_facts.append({
+                        "id": fact_id,
+                        "subject": fact.subject,
+                        "predicate": fact.predicate,
+                        "object": fact.object,
+                    })
+
+                all_topics.update(extraction.topics)
+                all_entities.update(extraction.entities)
+
+                if extraction.domain != Domain.GENERAL:
+                    detected_domain = extraction.domain
+
+                if extraction.summary and extraction.summary != "ドキュメントの要約":
+                    summaries.append(extraction.summary)
+
+            except Exception as chunk_error:
+                error_msg = f"Chunk {chunk.chunk_index + 1}: {chunk_error}"
+                logger.warning(f"Failed to process chunk of {document.filename}: {chunk_error}")
+                extraction_errors.append(error_msg)
+                continue
+
+        # Update document summary
+        if summaries:
+            overall_summary = " ".join(summaries[:5]) if len(summaries) > 1 else summaries[0]
+        else:
+            overall_summary = f"ドキュメント '{document.filename}' から {len(all_facts)} 件のファクトを抽出しました。"
+
+        await kg_store.update_document_status(
+            document_id,
+            DocumentStatus.COMPLETED,
+            extraction_result={
+                "summary": overall_summary,
+                "facts_count": len(all_facts),
+                "topics": list(all_topics),
+                "entities": list(all_entities),
+                "domain": detected_domain.value,
+            },
+        )
+
+        # Auto-tag extracted facts
+        total_fact_tags = 0
+        if all_facts:
+            try:
+                all_tags = await kg_store.get_all_tag_stats()
+                existing_tag_names = [t.name for t in sorted(all_tags, key=lambda x: -x.total_count)[:50]]
+
+                batch_size = 10
+                for i in range(0, len(all_facts), batch_size):
+                    batch = all_facts[i:i + batch_size]
+                    try:
+                        tagged = await agent.auto_tag_insights_batch(
+                            insights=batch,
+                            max_tags_per_insight=2,
+                            existing_tags=existing_tag_names,
+                        )
+                        total_fact_tags += sum(len(tags) for tags in tagged.values())
+                        for tag_list in tagged.values():
+                            for tag, _ in tag_list:
+                                if tag.name not in existing_tag_names:
+                                    existing_tag_names.append(tag.name)
+                    except Exception as batch_error:
+                        logger.warning(f"Batch tagging failed: {batch_error}")
+            except Exception as tag_error:
+                logger.warning(f"Failed to auto-tag facts: {tag_error}")
+
+        logger.info(
+            f"Document {document_id} fact extraction complete: "
+            f"{len(chunks)} chunks, {len(all_facts)} facts, {total_fact_tags} tags"
+        )
+
+        return {
+            "status": "extracted",
+            "document_id": document_id,
+            "chunks_processed": len(chunks),
+            "facts_extracted": len(all_facts),
+            "facts_tagged": total_fact_tags,
+            "topics": list(all_topics),
+            "entities": list(all_entities),
+            "summary": overall_summary,
+            "errors": extraction_errors,
+            "previous_facts_deleted": deleted_count,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to extract facts from document {document_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"ファクト抽出に失敗しました: {str(e)}")
+
+
+@app.get("/api/facts/recent", tags=["facts"])
+async def get_recent_facts(
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Get recent facts from all sources (documents and sessions).
+    
+    Args:
+        limit: Maximum number of facts to return (default: 50)
+    """
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        facts = await kg_store.get_all_recent_insights(limit=limit)
+        return {
+            "facts": facts,
+            "total": len(facts),
+        }
+    except Exception as e:
+        logger.error(f"Failed to get recent facts: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get recent facts")
 
 
 @app.post("/api/documents/{document_id}/facts/tags/refresh", tags=["tags"])
