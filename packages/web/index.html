@@ -424,14 +424,19 @@
                     </div>
                 </div>
 
-                <!-- 4. Evidence Ledger (Fact Table) -->
-                <div class="flex-none p-4 max-h-48 overflow-hidden">
-                    <div class="flex items-center justify-between mb-2">
-                        <h3 class="text-xs font-medium text-slate-400 uppercase tracking-wider">Fact Ledger</h3>
+                <!-- 4. Evidence Ledger (Fact Table) - Collapsible -->
+                <div class="flex-1 min-h-0 overflow-hidden flex flex-col border-t border-white/5">
+                    <button id="fact-ledger-toggle" class="w-full px-4 py-2.5 flex items-center justify-between text-left hover:bg-surface-2 transition-colors flex-none">
+                        <div class="flex items-center gap-2">
+                            <span id="fact-ledger-arrow" class="text-[10px] text-slate-500 transition-transform duration-200">▶</span>
+                            <h3 class="text-xs font-medium text-slate-400 uppercase tracking-wider">Fact Ledger</h3>
+                        </div>
                         <span id="fact-count" class="text-[10px] text-slate-500">0 facts</span>
-                    </div>
-                    <div id="fact-table" class="overflow-y-auto space-y-1 max-h-32">
-                        <p class="text-xs text-slate-600 py-4 text-center">まだ記録がありません</p>
+                    </button>
+                    <div id="fact-table-wrapper" class="px-4 pb-3 flex-1 min-h-0 overflow-hidden hidden">
+                        <div id="fact-table" class="overflow-y-auto space-y-1 h-full">
+                            <p class="text-xs text-slate-600 py-4 text-center">まだ記録がありません</p>
+                        </div>
                     </div>
                 </div>
 
@@ -625,7 +630,13 @@
                 this.tagNodeMap = {}; // Map of tag id -> tag node
                 this.hoveredTag = null;
                 this.tooltip = null;
-                this.connectionLines = null; // Lines showing tag connections
+                this.connectionLines = null; // Legacy
+                this.connectionLinesGroup = null; // Lines showing tag connections
+                
+                // Tag animation state
+                this.tagAnimating = false;
+                this.tagAnimStartTime = 0;
+                this.tagAnimDuration = 1500;
                 
                 // Zoom settings
                 this.zoomMin = this.radius * 1.5;  // Close zoom
@@ -666,9 +677,11 @@
                 
                 // Raycaster for hover detection
                 this.raycaster = new THREE.Raycaster();
-                this.raycaster.params.Points.threshold = 3;
+                this.raycaster.params.Points.threshold = 8;
                 this.mouse = new THREE.Vector2();
                 
+                this.circleTexture = this.createCircleTexture();
+                this.glowCircleTexture = this.createCircleTexture(true);
                 this.createParticles();
                 this.createTooltip();
                 
@@ -786,7 +799,7 @@
             
             async loadTagData() {
                 try {
-                    const response = await fetch('/api/knowledge-graph?limit=50');
+                    const response = await fetch('/api/knowledge-graph?limit=500');
                     if (!response.ok) return;
                     
                     const data = await response.json();
@@ -809,21 +822,45 @@
                         adjacency[e.target].push({ id: e.source, weight: e.co_occurrence_count });
                     });
                     
-                    // Calculate centrality score (usage + connections)
-                    const maxUsage = Math.max(...data.nodes.map(n => n.usage_count), 1);
-                    const maxConnections = Math.max(...Object.values(connectionCount), 1);
+                    // Calculate centrality score using LOG SCALE for clear differentiation
+                    // Without log, a tag with usage=241 would make all tags with usage=1-5 look identical
+                    const usages = data.nodes.map(n => n.usage_count);
+                    const connValues = Object.values(connectionCount);
+                    const maxLogUsage = Math.log(1 + Math.max(...usages, 1));
+                    const maxLogConn = Math.log(1 + Math.max(...connValues, 1));
+                    
+                    // Remember previous positions for animation
+                    const prevPositions = {};
+                    this.tagNodes.forEach(t => {
+                        prevPositions[t.id] = { x: t.baseX, y: t.baseY, z: t.baseZ };
+                    });
+                    const prevIds = new Set(this.tagNodes.map(t => t.id));
                     
                     // Initialize positions using force-directed layout on sphere
                     const nodes = data.nodes.map((n, i) => {
-                        const usageScore = n.usage_count / maxUsage;
-                        const connScore = (connectionCount[n.id] || 0) / maxConnections;
-                        // Centrality combines usage and connections (parent-like = high both)
+                        // Log scale: log(1+x) / log(1+max) spreads values more evenly
+                        const usageScore = Math.log(1 + n.usage_count) / maxLogUsage;
+                        const connScore = Math.log(1 + (connectionCount[n.id] || 0)) / maxLogConn;
                         const centrality = usageScore * 0.4 + connScore * 0.6;
                         
-                        // Initial position using golden angle
-                        const goldenAngle = Math.PI * (3 - Math.sqrt(5));
-                        const theta = goldenAngle * i;
-                        const phi = Math.acos(1 - 2 * (i + 0.5) / data.nodes.length);
+                        // If tag existed before, use its previous position as start
+                        const prev = prevPositions[n.id];
+                        let x, y, z;
+                        if (prev) {
+                            // Normalize previous position back to unit sphere
+                            const len = Math.sqrt(prev.x*prev.x + prev.y*prev.y + prev.z*prev.z) || 1;
+                            x = prev.x / len;
+                            y = prev.y / len;
+                            z = prev.z / len;
+                        } else {
+                            // New tag: initial position using golden angle
+                            const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+                            const theta = goldenAngle * i;
+                            const phi = Math.acos(1 - 2 * (i + 0.5) / data.nodes.length);
+                            x = Math.sin(phi) * Math.cos(theta);
+                            y = Math.cos(phi);
+                            z = Math.sin(phi) * Math.sin(theta);
+                        }
                         
                         return {
                             ...n,
@@ -831,35 +868,56 @@
                             usageScore,
                             connScore,
                             connections: adjacency[n.id] || [],
-                            // Spherical coordinates
-                            theta,
-                            phi,
-                            // 3D position (will be updated by force simulation)
-                            x: Math.sin(phi) * Math.cos(theta),
-                            y: Math.cos(phi),
-                            z: Math.sin(phi) * Math.sin(theta),
+                            x, y, z,
+                            isNew: !prevIds.has(n.id),
                         };
                     });
                     
                     // Force-directed simulation on sphere surface
                     this.runForceSimulation(nodes, data.edges);
                     
-                    // Convert to final positions
-                    this.tagNodes = nodes.map(n => {
+                    // Convert to final target positions
+                    const newTagNodes = nodes.map(n => {
                         const rFactor = 0.85 + n.centrality * 0.15;
                         const r = this.radius * rFactor;
+                        const targetX = n.x * r;
+                        const targetY = n.y * r;
+                        const targetZ = n.z * r;
+                        
+                        // For existing tags: animate from current to target
+                        // For new tags: animate from center (birth) to target
+                        const prev = prevPositions[n.id];
+                        const startX = prev ? prev.x : 0;
+                        const startY = prev ? prev.y : 0;
+                        const startZ = prev ? prev.z : 0;
+                        
                         return {
                             ...n,
                             r,
-                            baseX: n.x * r,
-                            baseY: n.y * r,
-                            baseZ: n.z * r,
+                            // Current (animated) positions — start from previous
+                            baseX: startX,
+                            baseY: startY,
+                            baseZ: startZ,
+                            // Target (final) positions
+                            targetX, targetY, targetZ,
+                            // Animation progress: 0 = start, 1 = done
+                            animProgress: 0,
+                            // New tag birth animation
+                            isNew: n.isNew,
+                            birthScale: n.isNew ? 0 : 1,
                         };
                     });
+                    
+                    this.tagNodes = newTagNodes;
                     
                     // Build map for quick lookup
                     this.tagNodeMap = {};
                     this.tagNodes.forEach(t => this.tagNodeMap[t.id] = t);
+                    
+                    // Trigger animated transition
+                    this.tagAnimating = true;
+                    this.tagAnimStartTime = performance.now();
+                    this.tagAnimDuration = 1500; // 1.5 seconds
                     
                     this.createTagParticles();
                 } catch (error) {
@@ -868,10 +926,10 @@
             }
             
             runForceSimulation(nodes, edges) {
-                // Simple force-directed layout on unit sphere
-                const iterations = 100;
-                const attractionStrength = 0.02;
-                const repulsionStrength = 0.005;
+                // Force-directed layout — connected tags cluster together
+                const iterations = 200;
+                const attractionStrength = 0.06;
+                const repulsionStrength = 0.003;
                 
                 // Build edge map with weights
                 const edgeMap = {};
@@ -886,7 +944,7 @@
                 nodes.forEach(n => nodeMap[n.id] = n);
                 
                 for (let iter = 0; iter < iterations; iter++) {
-                    const temperature = 1 - iter / iterations; // Cooling
+                    const temperature = Math.pow(1 - iter / iterations, 1.5); // Smoother cooling
                     
                     // Calculate forces for each node
                     nodes.forEach(node => {
@@ -908,7 +966,7 @@
                             fz += (dz / dist) * repForce;
                         });
                         
-                        // Attraction to connected nodes
+                        // Attraction to connected nodes — stronger for higher co-occurrence
                         node.connections.forEach(conn => {
                             const other = nodeMap[conn.id];
                             if (!other) return;
@@ -918,11 +976,11 @@
                             const dz = other.z - node.z;
                             const dist = Math.sqrt(dx*dx + dy*dy + dz*dz) || 0.01;
                             
-                            // Attraction proportional to co-occurrence
-                            const attForce = attractionStrength * Math.log(1 + conn.weight);
-                            fx += (dx / dist) * attForce;
-                            fy += (dy / dist) * attForce;
-                            fz += (dz / dist) * attForce;
+                            // Attraction proportional to co-occurrence (stronger pull)
+                            const attForce = attractionStrength * Math.log(1 + conn.weight * 2);
+                            fx += (dx / dist) * attForce * dist; // Proportional to distance
+                            fy += (dy / dist) * attForce * dist;
+                            fz += (dz / dist) * attForce * dist;
                         });
                         
                         node.fx = fx * temperature;
@@ -943,6 +1001,41 @@
                         node.z /= len;
                     });
                 }
+            }
+            
+            createCircleTexture(glow = false) {
+                const size = 128;
+                const canvas = document.createElement('canvas');
+                canvas.width = size;
+                canvas.height = size;
+                const ctx = canvas.getContext('2d');
+                const center = size / 2;
+                const radius = size / 2;
+                
+                if (glow) {
+                    // Solid circle with crisp anti-aliased edge for tag particles
+                    const gradient = ctx.createRadialGradient(center, center, 0, center, center, radius);
+                    gradient.addColorStop(0, 'rgba(255, 255, 255, 1.0)');
+                    gradient.addColorStop(0.55, 'rgba(255, 255, 255, 1.0)');
+                    gradient.addColorStop(0.75, 'rgba(255, 255, 255, 0.6)');
+                    gradient.addColorStop(0.9, 'rgba(255, 255, 255, 0.1)');
+                    gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+                    ctx.fillStyle = gradient;
+                    ctx.fillRect(0, 0, size, size);
+                } else {
+                    // Clean circle for background particles
+                    const gradient = ctx.createRadialGradient(center, center, 0, center, center, radius);
+                    gradient.addColorStop(0, 'rgba(255, 255, 255, 1.0)');
+                    gradient.addColorStop(0.5, 'rgba(255, 255, 255, 0.9)');
+                    gradient.addColorStop(0.75, 'rgba(255, 255, 255, 0.4)');
+                    gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+                    ctx.fillStyle = gradient;
+                    ctx.fillRect(0, 0, size, size);
+                }
+                
+                const texture = new THREE.CanvasTexture(canvas);
+                texture.needsUpdate = true;
+                return texture;
             }
             
             createParticles() {
@@ -997,16 +1090,52 @@
                 geometry.setAttribute('depth', new THREE.BufferAttribute(depths, 1));
                 
                 const material = new THREE.PointsMaterial({
-                    size: 1.5,
+                    size: 2.0,
+                    map: this.circleTexture,
                     vertexColors: true,
                     transparent: true,
                     opacity: 0.75,
                     blending: THREE.AdditiveBlending,
-                    sizeAttenuation: true
+                    sizeAttenuation: true,
+                    depthWrite: false
                 });
                 
                 this.particles = new THREE.Points(geometry, material);
                 this.scene.add(this.particles);
+            }
+            
+            // Importance color: multi-stop gradient for clearer differentiation
+            // t=0 (low importance) = Blue, t=1 (high importance) = Red
+            getImportanceColor(t) {
+                // 5-stop gradient: Deep Blue → Blue → Purple → Orange-Red → Bright Red
+                const stops = [
+                    { t: 0.0, r: 0.15, g: 0.25, b: 1.0  },  // Deep blue
+                    { t: 0.25, r: 0.2,  g: 0.4,  b: 0.95 },  // Blue
+                    { t: 0.5,  r: 0.6,  g: 0.15, b: 0.7  },  // Purple
+                    { t: 0.75, r: 0.95, g: 0.3,  b: 0.15 },  // Orange-Red
+                    { t: 1.0,  r: 1.0,  g: 0.15, b: 0.1  },  // Bright Red
+                ];
+                
+                // Find the two stops to interpolate between
+                let low = stops[0], high = stops[stops.length - 1];
+                for (let i = 0; i < stops.length - 1; i++) {
+                    if (t >= stops[i].t && t <= stops[i + 1].t) {
+                        low = stops[i];
+                        high = stops[i + 1];
+                        break;
+                    }
+                }
+                
+                const range = high.t - low.t || 1;
+                const f = (t - low.t) / range;
+                // Smooth interpolation
+                const sf = f * f * (3 - 2 * f);
+                
+                return {
+                    r: low.r + (high.r - low.r) * sf,
+                    g: low.g + (high.g - low.g) * sf,
+                    b: low.b + (high.b - low.b) * sf,
+                };
             }
             
             createTagParticles() {
@@ -1019,40 +1148,59 @@
                 const geometry = new THREE.BufferGeometry();
                 const positions = new Float32Array(this.tagNodes.length * 3);
                 const colors = new Float32Array(this.tagNodes.length * 3);
+                const sizes = new Float32Array(this.tagNodes.length);
                 
                 this.tagNodes.forEach((tag, i) => {
                     positions[i * 3] = tag.baseX;
                     positions[i * 3 + 1] = tag.baseY;
                     positions[i * 3 + 2] = tag.baseZ;
                     
-                    // Red-Blue gradient based on centrality
-                    // High centrality (parent tags) = Red
-                    // Low centrality (leaf tags) = Blue
-                    const t = tag.centrality; // 0 = leaf (blue), 1 = parent (red)
+                    const t = tag.centrality; // 0 = low importance (blue), 1 = high importance (red)
+                    const c = this.getImportanceColor(t);
                     
-                    // Gradient: Blue (0,0,1) -> Purple (0.5,0,0.5) -> Red (1,0,0)
-                    // Using smooth interpolation for vibrant colors
-                    const r = t;                           // Red increases with centrality
-                    const g = 0;                           // No green for pure red-blue gradient
-                    const b = 1 - t;                       // Blue decreases with centrality
+                    // Brightness boost so particles are vivid
+                    const brightness = 0.85 + t * 0.15;
+                    colors[i * 3]     = c.r * brightness;
+                    colors[i * 3 + 1] = c.g * brightness;
+                    colors[i * 3 + 2] = c.b * brightness;
                     
-                    // Add brightness boost for visibility
-                    const brightness = 0.7 + t * 0.3;
-                    colors[i * 3] = r * brightness;
-                    colors[i * 3 + 1] = g * brightness;
-                    colors[i * 3 + 2] = b * brightness;
+                    // Size scales with importance — larger for more important tags
+                    sizes[i] = 3.0 + t * 7.0; // 3 ~ 10
                 });
                 
                 geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
                 geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+                geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
                 
-                const material = new THREE.PointsMaterial({
-                    size: 3,
-                    vertexColors: true,
+                // Custom ShaderMaterial so each particle can have its own size + color
+                const material = new THREE.ShaderMaterial({
+                    uniforms: {
+                        pointTexture: { value: this.glowCircleTexture },
+                    },
+                    vertexShader: `
+                        attribute float size;
+                        attribute vec3 color;
+                        varying vec3 vColor;
+                        void main() {
+                            vColor = color;
+                            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                            gl_PointSize = size * (200.0 / -mvPosition.z);
+                            gl_Position = projectionMatrix * mvPosition;
+                        }
+                    `,
+                    fragmentShader: `
+                        uniform sampler2D pointTexture;
+                        varying vec3 vColor;
+                        void main() {
+                            vec4 texColor = texture2D(pointTexture, gl_PointCoord);
+                            if (texColor.a < 0.01) discard;
+                            gl_FragColor = vec4(vColor * texColor.rgb, texColor.a);
+                        }
+                    `,
+                    blending: THREE.NormalBlending,
+                    depthWrite: false,
+                    depthTest: true,
                     transparent: true,
-                    opacity: 0.95,
-                    blending: THREE.AdditiveBlending,
-                    sizeAttenuation: true
                 });
                 
                 this.tagPoints = new THREE.Points(geometry, material);
@@ -1105,23 +1253,62 @@
                 this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
                 
                 if (this.tagPoints && this.tagNodes.length > 0) {
-                    this.raycaster.setFromCamera(this.mouse, this.camera);
-                    const intersects = this.raycaster.intersectObject(this.tagPoints);
+                    // Screen-space hit test: project each tag to screen, find nearest
+                    const mouseX = event.clientX - rect.left;
+                    const mouseY = event.clientY - rect.top;
+                    const w = rect.width;
+                    const h = rect.height;
                     
-                    if (intersects.length > 0) {
-                        const idx = intersects[0].index;
-                        const tag = this.tagNodes[idx];
+                    let closestTag = null;
+                    let closestDist = Infinity;
+                    const hitRadius = 20; // pixels — generous hover area
+                    
+                    const tempVec = new THREE.Vector3();
+                    
+                    for (let i = 0; i < this.tagNodes.length; i++) {
+                        const tag = this.tagNodes[i];
+                        const pos = this.getTagDisplayPos(tag);
                         
-                        if (tag !== this.hoveredTag) {
-                            this.hoveredTag = tag;
-                            this.showTooltip(event, tag);
-                            this.showConnectionLines(tag);
+                        // Apply tagPoints rotation to get world position
+                        tempVec.set(pos.x, pos.y, pos.z);
+                        if (this.tagPoints) {
+                            tempVec.applyMatrix4(this.tagPoints.matrixWorld);
+                        }
+                        
+                        // Project to screen
+                        tempVec.project(this.camera);
+                        const sx = (tempVec.x * 0.5 + 0.5) * w;
+                        const sy = (-tempVec.y * 0.5 + 0.5) * h;
+                        
+                        // Skip points behind camera
+                        if (tempVec.z > 1) continue;
+                        
+                        const dx = mouseX - sx;
+                        const dy = mouseY - sy;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        
+                        // Larger hitbox for more important tags
+                        const tagHitRadius = hitRadius + tag.centrality * 10;
+                        
+                        if (dist < tagHitRadius && dist < closestDist) {
+                            closestDist = dist;
+                            closestTag = tag;
+                        }
+                    }
+                    
+                    if (closestTag) {
+                        if (closestTag !== this.hoveredTag) {
+                            this.hoveredTag = closestTag;
+                            this.showTooltip(event, closestTag);
+                            this.showConnectionLines(closestTag);
                         } else {
                             this.moveTooltip(event);
                         }
                     } else {
-                        this.hideTooltip();
-                        this.hideConnectionLines();
+                        if (this.hoveredTag) {
+                            this.hideTooltip();
+                            this.hideConnectionLines();
+                        }
                     }
                 }
             }
@@ -1131,35 +1318,59 @@
                 this.hideConnectionLines();
             }
             
+            // Get current display position of a tag (accounts for animation)
+            getTagDisplayPos(tag) {
+                if (this.tagAnimating && tag.targetX !== undefined) {
+                    const now = performance.now();
+                    const elapsed = now - this.tagAnimStartTime;
+                    const rawT = Math.min(elapsed / this.tagAnimDuration, 1);
+                    const easeT = 1 - Math.pow(1 - rawT, 3);
+                    return {
+                        x: tag.baseX + (tag.targetX - tag.baseX) * easeT,
+                        y: tag.baseY + (tag.targetY - tag.baseY) * easeT,
+                        z: tag.baseZ + (tag.targetZ - tag.baseZ) * easeT,
+                    };
+                }
+                return { x: tag.baseX, y: tag.baseY, z: tag.baseZ };
+            }
+            
             showConnectionLines(tag) {
                 this.hideConnectionLines(); // Remove existing lines
                 
                 if (!tag.connections || tag.connections.length === 0) return;
                 
+                this.connectionLinesGroup = new THREE.Group();
+                
                 const positions = [];
                 const colors = [];
                 
-                // Get tag color for the source
-                const sourceT = tag.centrality;
-                const sourceR = sourceT;
-                const sourceB = 1 - sourceT;
+                const srcColor = this.getImportanceColor(tag.centrality);
+                const srcPos = this.getTagDisplayPos(tag);
                 
                 tag.connections.forEach(conn => {
                     const targetTag = this.tagNodeMap[conn.id];
                     if (!targetTag) return;
                     
-                    // Target color
-                    const targetT = targetTag.centrality;
-                    const targetR = targetT;
-                    const targetB = 1 - targetT;
+                    const tgtColor = this.getImportanceColor(targetTag.centrality);
+                    const tgtPos = this.getTagDisplayPos(targetTag);
                     
-                    // Line from source to target (base positions, rotation applied to object)
-                    positions.push(tag.baseX, tag.baseY, tag.baseZ);
-                    positions.push(targetTag.baseX, targetTag.baseY, targetTag.baseZ);
+                    // Line from source to target
+                    positions.push(srcPos.x, srcPos.y, srcPos.z);
+                    positions.push(tgtPos.x, tgtPos.y, tgtPos.z);
                     
-                    // Gradient color along the line (source color -> target color)
-                    colors.push(sourceR, 0, sourceB);
-                    colors.push(targetR, 0, targetB);
+                    // Gradient from source importance color to target importance color
+                    // Brighten for visibility
+                    const boost = 0.3;
+                    colors.push(
+                        Math.min(1, srcColor.r + boost),
+                        Math.min(1, srcColor.g + boost),
+                        Math.min(1, srcColor.b + boost)
+                    );
+                    colors.push(
+                        Math.min(1, tgtColor.r + boost),
+                        Math.min(1, tgtColor.g + boost),
+                        Math.min(1, tgtColor.b + boost)
+                    );
                 });
                 
                 if (positions.length === 0) return;
@@ -1168,43 +1379,107 @@
                 geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
                 geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
                 
-                const material = new THREE.LineBasicMaterial({
+                // Soft glow layer
+                const glowMaterial = new THREE.LineBasicMaterial({
                     vertexColors: true,
                     transparent: true,
-                    opacity: 0.6,
+                    opacity: 0.3,
                     blending: THREE.AdditiveBlending,
-                    linewidth: 1,
+                    depthTest: false,
+                });
+                const glowLines = new THREE.LineSegments(geometry.clone(), glowMaterial);
+                glowLines.renderOrder = 10;
+                this.connectionLinesGroup.add(glowLines);
+                
+                // Main bright line
+                const mainMaterial = new THREE.LineBasicMaterial({
+                    vertexColors: true,
+                    transparent: true,
+                    opacity: 0.9,
+                    blending: THREE.AdditiveBlending,
+                    depthTest: false,
+                });
+                const mainLines = new THREE.LineSegments(geometry, mainMaterial);
+                mainLines.renderOrder = 11;
+                this.connectionLinesGroup.add(mainLines);
+                
+                // Add glowing dot at connection endpoints
+                tag.connections.forEach(conn => {
+                    const targetTag = this.tagNodeMap[conn.id];
+                    if (!targetTag) return;
+                    
+                    const tPos = this.getTagDisplayPos(targetTag);
+                    const tc = this.getImportanceColor(targetTag.centrality);
+                    const dotGeo = new THREE.SphereGeometry(0.6, 12, 12);
+                    const dotMat = new THREE.MeshBasicMaterial({
+                        color: new THREE.Color(
+                            Math.min(1, tc.r + 0.2),
+                            Math.min(1, tc.g + 0.2),
+                            Math.min(1, tc.b + 0.2)
+                        ),
+                        transparent: true,
+                        opacity: 0.85,
+                        blending: THREE.AdditiveBlending,
+                        depthTest: false,
+                    });
+                    const dot = new THREE.Mesh(dotGeo, dotMat);
+                    dot.position.set(tPos.x, tPos.y, tPos.z);
+                    dot.renderOrder = 12;
+                    this.connectionLinesGroup.add(dot);
                 });
                 
-                this.connectionLines = new THREE.LineSegments(geometry, material);
+                // Highlight dot at source
+                const sc = this.getImportanceColor(tag.centrality);
+                const srcDotGeo = new THREE.SphereGeometry(0.8, 12, 12);
+                const srcDotMat = new THREE.MeshBasicMaterial({
+                    color: new THREE.Color(
+                        Math.min(1, sc.r + 0.3),
+                        Math.min(1, sc.g + 0.3),
+                        Math.min(1, sc.b + 0.3)
+                    ),
+                    transparent: true,
+                    opacity: 0.95,
+                    blending: THREE.AdditiveBlending,
+                    depthTest: false,
+                });
+                const srcDot = new THREE.Mesh(srcDotGeo, srcDotMat);
+                srcDot.position.set(srcPos.x, srcPos.y, srcPos.z);
+                srcDot.renderOrder = 12;
+                this.connectionLinesGroup.add(srcDot);
+                
                 // Sync rotation with particles
                 if (this.particles) {
-                    this.connectionLines.rotation.copy(this.particles.rotation);
+                    this.connectionLinesGroup.rotation.copy(this.particles.rotation);
                 }
-                this.scene.add(this.connectionLines);
+                this.scene.add(this.connectionLinesGroup);
             }
             
             hideConnectionLines() {
-                if (this.connectionLines) {
-                    this.scene.remove(this.connectionLines);
-                    this.connectionLines.geometry.dispose();
-                    this.connectionLines.material.dispose();
-                    this.connectionLines = null;
+                if (this.connectionLinesGroup) {
+                    this.connectionLinesGroup.traverse((child) => {
+                        if (child.geometry) child.geometry.dispose();
+                        if (child.material) child.material.dispose();
+                    });
+                    this.scene.remove(this.connectionLinesGroup);
+                    this.connectionLinesGroup = null;
                 }
             }
             
             showTooltip(event, tag) {
-                // Generate color matching the tag's gradient position
+                // Generate color matching the importance gradient
                 const t = tag.centrality;
-                const r = Math.round(t * 255);
-                const b = Math.round((1 - t) * 255);
-                const tagColor = `rgb(${r}, 0, ${b})`;
+                const c = this.getImportanceColor(t);
+                const r = Math.round(c.r * 255);
+                const g = Math.round(c.g * 255);
+                const b = Math.round(c.b * 255);
+                const tagColor = `rgb(${r}, ${g}, ${b})`;
                 
-                // Centrality label
+                // Centrality label with importance levels
                 let centralityLabel = '';
-                if (t > 0.7) centralityLabel = '中核タグ';
-                else if (t > 0.4) centralityLabel = '中間タグ';
-                else centralityLabel = '末端タグ';
+                if (t > 0.75) centralityLabel = '重要度: 最高';
+                else if (t > 0.5) centralityLabel = '重要度: 高';
+                else if (t > 0.25) centralityLabel = '重要度: 中';
+                else centralityLabel = '重要度: 低';
                 
                 const content = `
                     <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
@@ -1255,6 +1530,7 @@
             onConflict() {
                 this.flashTimer = 2.5;
                 this.flashColor = [0.97, 0.27, 0.27];
+                setTimeout(() => this.loadTagData(), 1500);
             }
             
             onRelationAdded() {
@@ -1270,10 +1546,6 @@
                 
                 // Smooth zoom interpolation
                 this.camera.position.z = this.lerp(this.camera.position.z, this.targetZoom, 0.08);
-                
-                // Adjust raycaster threshold based on zoom (easier to hover when zoomed in)
-                const zoomFactor = this.camera.position.z / (this.radius * 2.8);
-                this.raycaster.params.Points.threshold = 2 + zoomFactor * 2;
                 
                 this.time += 0.006;
                 const geometry = this.particles.geometry;
@@ -1295,12 +1567,13 @@
                 if (this.tagPoints) {
                     this.tagPoints.rotation.y = this.particles.rotation.y;
                     this.tagPoints.rotation.x = this.particles.rotation.x;
+                    this.tagPoints.updateMatrixWorld(true);
                 }
                 
                 // Sync connection lines rotation
-                if (this.connectionLines) {
-                    this.connectionLines.rotation.y = this.particles.rotation.y;
-                    this.connectionLines.rotation.x = this.particles.rotation.x;
+                if (this.connectionLinesGroup) {
+                    this.connectionLinesGroup.rotation.y = this.particles.rotation.y;
+                    this.connectionLinesGroup.rotation.x = this.particles.rotation.x;
                 }
                 
                 if (this.flashTimer > 0) {
@@ -1372,6 +1645,64 @@
                 geometry.attributes.position.needsUpdate = true;
                 geometry.attributes.color.needsUpdate = true;
                 
+                // ---- Tag particle animation (position lerp + birth scale) ----
+                if (this.tagAnimating && this.tagPoints && this.tagNodes.length > 0) {
+                    const now = performance.now();
+                    const elapsed = now - this.tagAnimStartTime;
+                    const rawT = Math.min(elapsed / this.tagAnimDuration, 1);
+                    // Ease out cubic for smooth deceleration
+                    const easeT = 1 - Math.pow(1 - rawT, 3);
+                    
+                    const tagGeo = this.tagPoints.geometry;
+                    const tagPos = tagGeo.attributes.position.array;
+                    const tagSizes = tagGeo.attributes.size.array;
+                    
+                    this.tagNodes.forEach((tag, i) => {
+                        // Lerp position from start to target
+                        const cx = tag.baseX + (tag.targetX - tag.baseX) * easeT;
+                        const cy = tag.baseY + (tag.targetY - tag.baseY) * easeT;
+                        const cz = tag.baseZ + (tag.targetZ - tag.baseZ) * easeT;
+                        
+                        tagPos[i * 3]     = cx;
+                        tagPos[i * 3 + 1] = cy;
+                        tagPos[i * 3 + 2] = cz;
+                        
+                        // Birth animation for new tags: scale from 0 to full
+                        if (tag.isNew) {
+                            // Delayed start for new tags (appear after 30% of animation)
+                            const birthT = Math.max(0, (rawT - 0.3) / 0.7);
+                            const birthEase = 1 - Math.pow(1 - birthT, 2);
+                            tag.birthScale = birthEase;
+                            const baseSize = 3.0 + tag.centrality * 7.0;
+                            // Overshoot effect: grows slightly larger then settles
+                            const overshoot = birthT < 1 ? (1 + 0.3 * Math.sin(birthT * Math.PI)) : 1;
+                            tagSizes[i] = baseSize * birthEase * overshoot;
+                        }
+                    });
+                    
+                    tagGeo.attributes.position.needsUpdate = true;
+                    tagGeo.attributes.size.needsUpdate = true;
+                    
+                    // When animation completes, snap to final positions
+                    if (rawT >= 1) {
+                        this.tagAnimating = false;
+                        this.tagNodes.forEach((tag, i) => {
+                            tag.baseX = tag.targetX;
+                            tag.baseY = tag.targetY;
+                            tag.baseZ = tag.targetZ;
+                            tag.isNew = false;
+                            tag.birthScale = 1;
+                            tagPos[i * 3]     = tag.baseX;
+                            tagPos[i * 3 + 1] = tag.baseY;
+                            tagPos[i * 3 + 2] = tag.baseZ;
+                        });
+                        tagGeo.attributes.position.needsUpdate = true;
+                        // Rebuild tag node map with final positions
+                        this.tagNodeMap = {};
+                        this.tagNodes.forEach(t => this.tagNodeMap[t.id] = t);
+                    }
+                }
+                
                 this.renderer.render(this.scene, this.camera);
             }
             
@@ -1415,6 +1746,9 @@
         const topicCoverageEl = document.getElementById('topic-coverage-list');
         const factTableEl = document.getElementById('fact-table');
         const factCountEl = document.getElementById('fact-count');
+        const factTableWrapper = document.getElementById('fact-table-wrapper');
+        const factLedgerToggle = document.getElementById('fact-ledger-toggle');
+        const factLedgerArrow = document.getElementById('fact-ledger-arrow');
         const sessionListEl = document.getElementById('session-list');
         const sendBtn = document.getElementById('send-btn');
         const newSessionBtn = document.getElementById('new-session-btn');
@@ -1895,6 +2229,13 @@
             resetSession();
         });
 
+        // Fact Ledger toggle
+        factLedgerToggle?.addEventListener('click', () => {
+            const isHidden = factTableWrapper.classList.toggle('hidden');
+            factLedgerArrow.textContent = isHidden ? '▶' : '▼';
+            factLedgerArrow.style.transform = ''; // reset any transform
+        });
+
         // Conflicts toggle
         conflictsToggle?.addEventListener('click', () => {
             conflictsList.classList.toggle('hidden');
@@ -1998,8 +2339,34 @@
         }
 
         function addFact(fact) {
+            // Avoid duplicates by id
+            if (fact.id && facts.some(f => f.id === fact.id)) return;
             facts.push(fact);
             renderFacts();
+        }
+
+        // Load all facts from the knowledge graph (documents + sessions)
+        async function loadAllFacts() {
+            try {
+                const res = await fetch(`${API_BASE}/api/facts/recent?limit=50`);
+                if (!res.ok) return;
+                const data = await res.json();
+                
+                if (data.facts?.length > 0) {
+                    // Merge with existing session facts (avoid duplicates)
+                    const existingIds = new Set(facts.map(f => f.id).filter(Boolean));
+                    for (const fact of data.facts) {
+                        if (!existingIds.has(fact.id)) {
+                            facts.push(fact);
+                            existingIds.add(fact.id);
+                        }
+                    }
+                    renderFacts();
+                    updateMetrics();
+                }
+            } catch (e) {
+                console.error('Error loading all facts:', e);
+            }
         }
 
         function renderFacts() {
@@ -2010,16 +2377,25 @@
             }
             
             factCountEl.textContent = `${facts.length} facts`;
+            // Auto-expand when facts are loaded
+            if (factTableWrapper && factTableWrapper.classList.contains('hidden')) {
+                factTableWrapper.classList.remove('hidden');
+                if (factLedgerArrow) factLedgerArrow.textContent = '▼';
+            }
             factTableEl.innerHTML = facts.map((f, i) => {
                 const status = f.verified ? 'verified' : 'pending';
+                const sourceLabel = f.document_filename 
+                    ? `<span class="text-[10px] text-purple-400/60">📄 ${escapeHtml(f.document_filename)}</span>` 
+                    : '';
                 return `
                     <div class="fact-row p-2 rounded-lg border border-white/5">
                         <div class="flex items-start gap-2">
                             <span class="w-1.5 h-1.5 mt-1.5 rounded-full flex-none ${status === 'verified' ? 'bg-verified' : 'bg-pending'}"></span>
                             <div class="flex-1 min-w-0">
-                                <p class="text-xs text-white leading-relaxed">${escapeHtml(f.object || f.content || '')}</p>
-                                <div class="flex items-center gap-2 mt-1">
+                                <p class="text-xs text-white leading-relaxed">${escapeHtml(f.predicate ? (f.subject + ' ' + f.predicate + ' ' + (f.object || '')) : (f.object || f.content || ''))}</p>
+                                <div class="flex items-center gap-2 mt-1 flex-wrap">
                                     <span class="text-[10px] text-slate-500">${escapeHtml(f.subject || '')}</span>
+                                    ${sourceLabel}
                                     ${f.tags?.length > 0 ? f.tags.map(t => `<span class="text-[10px] bg-surface-3 px-1.5 py-0.5 rounded">${escapeHtml(t)}</span>`).join('') : ''}
                                 </div>
                             </div>
@@ -2336,17 +2712,16 @@
             chatMessages.innerHTML = '';
             intentInput.value = '';
             messageInput.value = '';
-            factTableEl.innerHTML = '<p class="text-xs text-slate-600 py-4 text-center">まだ記録がありません</p>';
-            factCountEl.textContent = '0 facts';
             conflictsSection.classList.add('hidden');
             questionsSection.classList.add('hidden');
             
             startScreen.classList.remove('hidden');
             chatScreen.classList.add('hidden');
             
-            updateMetrics();
             updateStatus('待機中');
             loadSessions();
+            // Reload all facts from knowledge graph (keeps document-derived facts visible)
+            loadAllFacts();
         }
 
         function escapeHtml(str) {
@@ -2449,13 +2824,30 @@
             }
         }
 
+        let _prevDocStatuses = {};
         async function loadDocuments() {
             try {
                 const response = await fetch(`${API_BASE}/api/documents`);
                 if (!response.ok) return;
                 
                 const data = await response.json();
+                const prevDocs = uploadedDocuments;
                 uploadedDocuments = data.documents || [];
+                
+                // Detect newly completed documents and refresh knowledge map
+                let newlyCompleted = false;
+                uploadedDocuments.forEach(d => {
+                    if (d.status === 'completed' && _prevDocStatuses[d.id] && _prevDocStatuses[d.id] !== 'completed') {
+                        newlyCompleted = true;
+                    }
+                });
+                // Save current statuses
+                _prevDocStatuses = {};
+                uploadedDocuments.forEach(d => _prevDocStatuses[d.id] = d.status);
+                
+                if (newlyCompleted && knowledgeMap) {
+                    knowledgeMap.loadTagData();
+                }
                 
                 // Update badge
                 if (documentsCountBadge) documentsCountBadge.textContent = `${uploadedDocuments.length} files`;
@@ -2518,11 +2910,11 @@
                 const tagPlaceholder = doc.status === 'completed' ? `
                     <div class="doc-tags flex flex-wrap gap-1 mt-1.5" data-doc-id="${doc.id}"></div>
                     <div class="flex gap-2 mt-2 pt-2 border-t border-white/5">
-                        <button onclick="refreshDocumentTags('${doc.id}')" class="flex-1 text-[10px] text-slate-400 hover:text-emerald-400 hover:bg-emerald-400/10 py-1 px-2 rounded transition-colors">
+                        <button id="tag-btn-${doc.id}" onclick="refreshDocumentTags('${doc.id}')" class="flex-1 text-[10px] text-slate-400 hover:text-emerald-400 hover:bg-emerald-400/10 py-1 px-2 rounded transition-colors">
                             🏷️ タグ再生成
                         </button>
-                        <button onclick="refreshFactsTags('${doc.id}')" class="flex-1 text-[10px] text-slate-400 hover:text-purple-400 hover:bg-purple-400/10 py-1 px-2 rounded transition-colors">
-                            📊 Facts分析
+                        <button id="extract-btn-${doc.id}" onclick="extractDocumentFacts('${doc.id}')" class="flex-1 text-[10px] text-slate-400 hover:text-purple-400 hover:bg-purple-400/10 py-1 px-2 rounded transition-colors">
+                            📊 Facts抽出
                         </button>
                     </div>` : '';
                 
@@ -2580,7 +2972,22 @@
         }
         
         // Refresh document tags using LLM
+        const _taggingDocs = new Set();
         window.refreshDocumentTags = async function(docId) {
+            if (_taggingDocs.has(docId)) {
+                showToast('🏷️ このドキュメントはタグ生成中です。完了までお待ちください。', 'info');
+                return;
+            }
+            _taggingDocs.add(docId);
+
+            const btn = document.getElementById(`tag-btn-${docId}`);
+            const originalText = btn?.innerHTML;
+            if (btn) {
+                btn.disabled = true;
+                btn.classList.add('opacity-50', 'cursor-not-allowed', 'pointer-events-none');
+                btn.innerHTML = '<span class="inline-flex items-center gap-1"><span class="animate-spin text-[10px]">⏳</span> 生成中...</span>';
+            }
+
             const container = document.querySelector(`.doc-tags[data-doc-id="${docId}"]`);
             if (container) {
                 container.innerHTML = '<span class="text-[9px] text-amber-400 animate-pulse">🏷️ タグ生成中...</span>';
@@ -2595,8 +3002,9 @@
                 if (res.ok) {
                     const result = await res.json();
                     showToast(`🏷️ ${result.tags_assigned}個のタグを付与しました`, 'success');
-                    loadDocumentTags(); // Reload tags
-                    loadTags(); // Reload tag cloud
+                    loadDocumentTags();
+                    loadTags();
+                    if (knowledgeMap) knowledgeMap.loadTagData();
                 } else {
                     const error = await res.json();
                     showToast(`❌ ${error.detail || 'タグ生成に失敗しました'}`, 'error');
@@ -2606,34 +3014,75 @@
                 console.error('Error refreshing tags:', e);
                 showToast('❌ タグ生成に失敗しました', 'error');
                 if (container) container.innerHTML = '<span class="text-[9px] text-slate-600">タグなし</span>';
+            } finally {
+                _taggingDocs.delete(docId);
+                if (btn) {
+                    btn.disabled = false;
+                    btn.classList.remove('opacity-50', 'cursor-not-allowed', 'pointer-events-none');
+                    btn.innerHTML = originalText || '🏷️ タグ再生成';
+                }
             }
         };
 
-        // Refresh facts tags using LLM (batch processing)
-        window.refreshFactsTags = async function(docId) {
-            showToast('📊 Factsのタグを生成中... (時間がかかる場合があります)', 'info');
+        // Extract (or re-extract) facts from a document using LLM
+        const _extractingDocs = new Set();
+        window.extractDocumentFacts = async function(docId) {
+            // Prevent double-click
+            if (_extractingDocs.has(docId)) {
+                showToast('📊 このドキュメントは現在分析中です。完了までお待ちください。', 'info');
+                return;
+            }
+            _extractingDocs.add(docId);
+
+            const btn = document.getElementById(`extract-btn-${docId}`);
+            const originalText = btn?.innerHTML;
+            if (btn) {
+                btn.disabled = true;
+                btn.classList.add('opacity-50', 'cursor-not-allowed', 'pointer-events-none');
+                btn.innerHTML = '<span class="inline-flex items-center gap-1"><span class="animate-spin text-[10px]">⏳</span> 分析中...</span>';
+            }
+
+            showToast('📊 ドキュメントからFactsを抽出中... LLMで分析するため1〜2分かかります', 'info');
             
             try {
-                const res = await fetch(`${API_BASE}/api/documents/${docId}/facts/tags/refresh`, {
+                const res = await fetch(`${API_BASE}/api/documents/${docId}/facts/extract`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' }
                 });
                 
                 if (res.ok) {
                     const result = await res.json();
-                    if (result.status === 'no_facts') {
-                        showToast('📊 このドキュメントにはFactsがありません', 'info');
+                    if (result.facts_extracted === 0) {
+                        showToast('📊 Factsを抽出できませんでした。ドキュメントの内容を確認してください。', 'info');
                     } else {
-                        showToast(`📊 ${result.facts_tagged}件のFactsに${result.total_tags}個のタグを付与しました`, 'success');
-                        loadTags(); // Reload tag cloud
+                        const msg = result.previous_facts_deleted > 0 
+                            ? `📊 ${result.facts_extracted}件のFactsを再抽出しました（${result.facts_tagged}個のタグ付与）`
+                            : `📊 ${result.facts_extracted}件のFactsを抽出しました（${result.facts_tagged}個のタグ付与）`;
+                        showToast(msg, 'success');
+                        loadTags();
+                        loadAllFacts();
+                        loadDocuments();
+                        loadKnowledgeStats();
+                        if (knowledgeMap) knowledgeMap.loadTagData();
+                    }
+                    
+                    if (result.errors?.length > 0) {
+                        console.warn('Extraction had errors:', result.errors);
                     }
                 } else {
                     const error = await res.json();
-                    showToast(`❌ ${error.detail || 'Factsタグ生成に失敗しました'}`, 'error');
+                    showToast(`❌ ${error.detail || 'Facts抽出に失敗しました'}`, 'error');
                 }
             } catch (e) {
-                console.error('Error refreshing facts tags:', e);
-                showToast('❌ Factsタグ生成に失敗しました', 'error');
+                console.error('Error extracting facts:', e);
+                showToast('❌ Facts抽出に失敗しました', 'error');
+            } finally {
+                _extractingDocs.delete(docId);
+                if (btn) {
+                    btn.disabled = false;
+                    btn.classList.remove('opacity-50', 'cursor-not-allowed', 'pointer-events-none');
+                    btn.innerHTML = originalText || '📊 Facts抽出';
+                }
             }
         };
 
@@ -3017,6 +3466,7 @@
                     if (res.ok) {
                         showToast('タグを作成しました', 'success');
                         loadTags();
+                        if (knowledgeMap) knowledgeMap.loadTagData();
                         modal.remove();
                     } else if (res.status === 409) {
                         showToast('同名のタグが既に存在します', 'error');
@@ -3039,6 +3489,7 @@
                 if (res.ok) {
                     showToast('タグを削除しました', 'success');
                     loadTags();
+                    if (knowledgeMap) knowledgeMap.loadTagData();
                     document.getElementById('tag-detail-modal')?.remove();
                 } else {
                     showToast('削除に失敗しました', 'error');
@@ -3105,6 +3556,7 @@
                     if (res.ok) {
                         showToast('タグを更新しました', 'success');
                         loadTags();
+                        if (knowledgeMap) knowledgeMap.loadTagData();
                         modal.remove();
                     } else {
                         showToast('更新に失敗しました', 'error');
@@ -3216,6 +3668,7 @@
                     const result = await res.json();
                     showToast(`${result.merged_count}個のタグを統合しました`, 'success');
                     loadTags();
+                    if (knowledgeMap) knowledgeMap.loadTagData();
                     document.getElementById('tag-manage-modal').remove();
                 } else {
                     showToast('統合に失敗しました', 'error');
@@ -3238,6 +3691,7 @@
         loadKnowledgeStats();
         loadTags();
         loadConflicts();
+        loadAllFacts();
     </script>
 </body>
 </html>

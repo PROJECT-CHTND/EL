@@ -984,6 +984,13 @@ Example:
         if chunk_context:
             system_content += chunk_context
         
+        # Inject pre-searched knowledge (extracted facts) as reference context
+        if pre_search_knowledge:
+            knowledge_context = self._format_knowledge_context(
+                pre_search_knowledge, session.language
+            )
+            system_content += knowledge_context
+        
         if consistency_context:
             system_content += consistency_context
 
@@ -1107,6 +1114,45 @@ Example:
             pending_questions=[q for q in all_active_questions if q.status == QuestionStatus.PENDING],
             questions_answered=answered_question_ids,
         )
+
+    def _format_knowledge_context(
+        self,
+        knowledge: list[KnowledgeItem],
+        language: str,
+    ) -> str:
+        """Format pre-searched knowledge items as context for LLM.
+
+        Injects extracted facts from documents and prior sessions so the LLM
+        can directly reference them without needing to call a tool.
+
+        Args:
+            knowledge: List of relevant knowledge items from pre-search.
+            language: Session language.
+
+        Returns:
+            Formatted context string to append to system prompt.
+        """
+        if not knowledge:
+            return ""
+
+        if language.lower() in ("english", "en"):
+            context = "\n\n### 📚 Related Knowledge (from documents and prior sessions)\n"
+            context += "The following facts were found in the knowledge base. Use them to answer accurately.\n\n"
+        else:
+            context = "\n\n### 📚 関連する知識（ドキュメント・過去のセッションから抽出）\n"
+            context += "以下は知識ベースで見つかった関連ファクトです。回答の参考にしてください。\n\n"
+
+        for i, item in enumerate(knowledge, 1):
+            date_str = ""
+            if item.event_date:
+                date_str = f" [{item.event_date.strftime('%Y-%m-%d')}"
+                if item.event_date_end and item.event_date_end != item.event_date:
+                    date_str += f"〜{item.event_date_end.strftime('%Y-%m-%d')}"
+                date_str += "]"
+            context += f"- **{item.subject}** {item.predicate} **{item.object}**{date_str} (信頼度: {item.confidence:.0%})\n"
+
+        context += "\n"
+        return context
 
     def _format_chunk_context(
         self,
@@ -2097,6 +2143,7 @@ Example:
             {"role": "user", "content": user_prompt},
         ]
 
+        result_content = ""
         try:
             import json
             response = await self._llm.chat(messages=messages)  # type: ignore
@@ -2105,16 +2152,44 @@ Example:
             # Clean up response
             result_content = result_content.strip()
             if result_content.startswith("```"):
-                result_content = result_content.split("\n", 1)[-1]
+                # Handle ```json or ``` prefix
+                first_line_end = result_content.find("\n")
+                if first_line_end > 0:
+                    result_content = result_content[first_line_end + 1:]
+                else:
+                    result_content = result_content[3:]
             if result_content.endswith("```"):
                 result_content = result_content.rsplit("```", 1)[0]
             result_content = result_content.strip()
 
+            logger.debug(f"LLM extraction response for {filename} (first 500 chars): {result_content[:500]}")
+
+            if not result_content or result_content == "{}":
+                logger.warning(f"LLM returned empty response for document: {filename}")
+                return DocumentExtractionResult(
+                    summary=f"LLMが空のレスポンスを返しました: {filename}",
+                    facts=[],
+                    topics=[],
+                    entities=[],
+                    domain=Domain.GENERAL,
+                )
+
             data = json.loads(result_content)
+
+            # Validate that we got meaningful data
+            raw_facts = data.get("facts", [])
+            raw_summary = data.get("summary", "")
+
+            if not raw_facts and not raw_summary:
+                logger.warning(
+                    f"LLM returned JSON with no facts and no summary for document: {filename}. "
+                    f"Keys in response: {list(data.keys())}"
+                )
 
             # Parse facts with date information
             facts = []
-            for f in data.get("facts", []):
+            skipped_facts = 0
+            for f in raw_facts:
                 if isinstance(f, dict) and "subject" in f and "predicate" in f and "object" in f:
                     # Parse event_date
                     event_date = None
@@ -2150,6 +2225,14 @@ Example:
                         event_date_end=event_date_end,
                         date_type=date_type,
                     ))
+                else:
+                    skipped_facts += 1
+
+            if skipped_facts > 0:
+                logger.warning(
+                    f"Skipped {skipped_facts} malformed facts from document: {filename}. "
+                    f"Total valid: {len(facts)}"
+                )
 
             # Parse domain
             domain_str = data.get("domain", "general")
@@ -2158,21 +2241,41 @@ Example:
             except ValueError:
                 domain = Domain.GENERAL
 
+            # Use meaningful summary, not the placeholder default
+            summary = raw_summary if raw_summary else f"ドキュメント '{filename}' を分析しました。"
+
             result = DocumentExtractionResult(
-                summary=data.get("summary", "ドキュメントの要約"),
+                summary=summary,
                 facts=facts,
                 topics=data.get("topics", []),
                 entities=data.get("entities", []),
                 domain=domain,
             )
 
-            logger.info(f"Extracted {len(facts)} facts from document: {filename}")
+            logger.info(
+                f"Extracted from document '{filename}': "
+                f"{len(facts)} facts, {len(result.topics)} topics, "
+                f"{len(result.entities)} entities, domain={domain.value}, "
+                f"summary='{summary[:80]}...'"
+            )
             return result
 
-        except Exception as e:
-            logger.warning(f"Failed to extract from document: {e}")
+        except json.JSONDecodeError as e:
+            logger.error(
+                f"Failed to parse LLM JSON response for document '{filename}': {e}. "
+                f"Response content (first 300 chars): {result_content[:300]}"
+            )
             return DocumentExtractionResult(
-                summary=f"{filename} のドキュメント",
+                summary=f"{filename} の解析でJSONパースエラーが発生しました",
+                facts=[],
+                topics=[],
+                entities=[],
+                domain=Domain.GENERAL,
+            )
+        except Exception as e:
+            logger.error(f"Failed to extract from document '{filename}': {e}", exc_info=True)
+            return DocumentExtractionResult(
+                summary=f"{filename} の解析でエラーが発生しました",
                 facts=[],
                 topics=[],
                 entities=[],

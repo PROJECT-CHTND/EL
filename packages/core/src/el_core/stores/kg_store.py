@@ -153,6 +153,9 @@ class KnowledgeGraphStore:
     ) -> list[KnowledgeItem]:
         """Search the knowledge graph for relevant insights.
 
+        Combines full-text index search (on predicate) with Entity name matching
+        (on subject/object) to find all relevant facts.
+
         Args:
             query: Search query (keywords or concepts).
             limit: Maximum number of results.
@@ -163,72 +166,82 @@ class KnowledgeGraphStore:
         Returns:
             List of matching knowledge items.
         """
-        # Full-text search across subject, predicate, and object
-        cypher = """
-        CALL db.index.fulltext.queryNodes('insight_search', $search_term)
-        YIELD node, score
-        WHERE node:Insight
-        """
-
-        if domain:
-            cypher += " AND node.domain = $domain_filter"
-        
-        if start_date:
-            cypher += " AND (node.event_date IS NULL OR node.event_date >= $start_date)"
-        
-        if end_date:
-            cypher += " AND (node.event_date IS NULL OR node.event_date <= $end_date)"
-
-        cypher += """
-        MATCH (s:Entity)-[:SUBJECT_OF]->(node)-[:HAS_OBJECT]->(o:Entity)
-        RETURN 
-            node.id AS id,
-            s.name AS subject,
-            node.predicate AS predicate,
-            o.name AS object,
-            node.confidence AS confidence,
-            node.domain AS domain,
-            node.created_at AS created_at,
-            node.event_date AS event_date,
-            node.event_date_end AS event_date_end,
-            node.date_type AS date_type,
-            score
-        ORDER BY score DESC
-        LIMIT $max_results
-        """
-
-        params: dict[str, Any] = {"search_term": query, "max_results": limit}
-        if domain:
-            params["domain_filter"] = domain.value
-        if start_date:
-            params["start_date"] = start_date.isoformat()
-        if end_date:
-            params["end_date"] = end_date.isoformat()
-
         items: list[KnowledgeItem] = []
+        seen_ids: set[str] = set()
 
+        # 1. Full-text search on predicate field
         try:
+            ft_cypher = """
+            CALL db.index.fulltext.queryNodes('insight_search', $search_term)
+            YIELD node, score
+            WHERE node:Insight
+            """
+            if domain:
+                ft_cypher += " AND node.domain = $domain_filter"
+            if start_date:
+                ft_cypher += " AND (node.event_date IS NULL OR node.event_date >= $start_date)"
+            if end_date:
+                ft_cypher += " AND (node.event_date IS NULL OR node.event_date <= $end_date)"
+
+            ft_cypher += """
+            MATCH (s:Entity)-[:SUBJECT_OF]->(node)-[:HAS_OBJECT]->(o:Entity)
+            RETURN 
+                node.id AS id, s.name AS subject, node.predicate AS predicate,
+                o.name AS object, node.confidence AS confidence, node.domain AS domain,
+                node.created_at AS created_at, node.event_date AS event_date,
+                node.event_date_end AS event_date_end, node.date_type AS date_type,
+                score
+            ORDER BY score DESC
+            LIMIT $max_results
+            """
+
+            params: dict[str, Any] = {"search_term": query, "max_results": limit}
+            if domain:
+                params["domain_filter"] = domain.value
+            if start_date:
+                params["start_date"] = start_date.isoformat()
+            if end_date:
+                params["end_date"] = end_date.isoformat()
+
             async with self.driver.session() as session:
-                result = await session.run(cypher, **params)
+                result = await session.run(ft_cypher, **params)
                 async for record in result:
-                    items.append(
-                        KnowledgeItem(
-                            id=record["id"],
-                            subject=record["subject"],
-                            predicate=record["predicate"],
-                            object=record["object"],
-                            confidence=record["confidence"],
-                            domain=Domain(record["domain"]),
-                            created_at=datetime.fromisoformat(record["created_at"]),
-                            event_date=datetime.fromisoformat(record["event_date"]) if record["event_date"] else None,
-                            event_date_end=datetime.fromisoformat(record["event_date_end"]) if record["event_date_end"] else None,
-                            date_type=DateType(record["date_type"]) if record["date_type"] else DateType.UNKNOWN,
+                    item_id = record["id"]
+                    if item_id not in seen_ids:
+                        seen_ids.add(item_id)
+                        items.append(
+                            KnowledgeItem(
+                                id=item_id,
+                                subject=record["subject"],
+                                predicate=record["predicate"],
+                                object=record["object"],
+                                confidence=record["confidence"],
+                                domain=Domain(record["domain"]),
+                                created_at=datetime.fromisoformat(record["created_at"]),
+                                event_date=datetime.fromisoformat(record["event_date"]) if record["event_date"] else None,
+                                event_date_end=datetime.fromisoformat(record["event_date_end"]) if record["event_date_end"] else None,
+                                date_type=DateType(record["date_type"]) if record["date_type"] else DateType.UNKNOWN,
+                            )
                         )
-                    )
         except Exception as e:
-            # If full-text index doesn't exist, fall back to basic search
-            logger.warning(f"Full-text search failed, using basic search: {e}")
-            items = await self._basic_search(query, limit, domain, start_date, end_date)
+            logger.warning(f"Full-text search failed: {e}")
+
+        # 2. Entity-based search: find facts where subject or object name matches
+        #    This catches queries like "ON01について" or "岡谷システムの会議室" etc.
+        if len(items) < limit:
+            try:
+                entity_items = await self._basic_search(
+                    query, limit - len(items), domain, start_date, end_date
+                )
+                for item in entity_items:
+                    if item.id not in seen_ids:
+                        seen_ids.add(item.id)
+                        items.append(item)
+            except Exception as e:
+                logger.warning(f"Entity-based search failed: {e}")
+
+        if items:
+            logger.info(f"Knowledge search for '{query[:50]}': found {len(items)} facts")
 
         return items
 
@@ -1854,6 +1867,78 @@ class KnowledgeGraphStore:
                         event_date_end=datetime.fromisoformat(node["event_date_end"]) if node.get("event_date_end") else None,
                         date_type=DateType(node["date_type"]) if node.get("date_type") else None,
                     ))
+                except Exception as e:
+                    logger.warning(f"Failed to parse insight {node.get('id')}: {e}")
+                    continue
+        return insights
+
+    async def delete_document_insights(self, document_id: str) -> int:
+        """Delete all insights/facts linked to a document (without deleting the document itself).
+
+        Args:
+            document_id: The document ID.
+
+        Returns:
+            Number of insights deleted.
+        """
+        cypher = """
+        MATCH (d:Document {id: $document_id})-[:EXTRACTED]->(i:Insight)
+        DETACH DELETE i
+        RETURN count(i) AS deleted
+        """
+
+        async with self.driver.session() as session:
+            result = await session.run(cypher, document_id=document_id)
+            record = await result.single()
+            deleted = record["deleted"] if record else 0
+            if deleted:
+                logger.info(f"Deleted {deleted} insights for document {document_id}")
+            return deleted
+
+    async def get_all_recent_insights(self, limit: int = 50) -> list[dict]:
+        """Get recent insights from all sources (documents and sessions).
+
+        Args:
+            limit: Maximum number of insights to return.
+
+        Returns:
+            List of insight dicts with source information.
+        """
+        cypher = """
+        MATCH (i:Insight)
+        OPTIONAL MATCH (s:Entity)-[:SUBJECT_OF]->(i)
+        OPTIONAL MATCH (i)-[:HAS_OBJECT]->(o:Entity)
+        OPTIONAL MATCH (d:Document)-[:EXTRACTED]->(i)
+        OPTIONAL MATCH (i)-[:HAS_TAG]->(t:Tag)
+        WITH i, s.name AS subject, o.name AS object, 
+             d.id AS document_id, d.filename AS document_filename,
+             collect(DISTINCT t.name) AS tags
+        WHERE subject IS NOT NULL AND object IS NOT NULL
+        RETURN i, subject, object, document_id, document_filename, tags
+        ORDER BY i.created_at DESC
+        LIMIT $limit
+        """
+
+        insights: list[dict] = []
+        async with self.driver.session() as session:
+            result = await session.run(cypher, limit=limit)
+            async for record in result:
+                node = record["i"]
+                try:
+                    insights.append({
+                        "id": node["id"],
+                        "subject": record["subject"],
+                        "predicate": node.get("predicate", ""),
+                        "object": record["object"],
+                        "confidence": node.get("confidence", 1.0),
+                        "domain": node.get("domain", "general"),
+                        "verified": node.get("status", "pending") == "verified",
+                        "event_date": node.get("event_date"),
+                        "document_id": record["document_id"],
+                        "document_filename": record["document_filename"],
+                        "tags": record["tags"] or [],
+                        "created_at": node.get("created_at"),
+                    })
                 except Exception as e:
                     logger.warning(f"Failed to parse insight {node.get('id')}: {e}")
                     continue
