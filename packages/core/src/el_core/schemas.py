@@ -131,6 +131,8 @@ class ConversationTurn(BaseModel):
     insights_saved: list[Insight] = Field(default_factory=list)
     knowledge_used: list[KnowledgeItem] = Field(default_factory=list)
     detected_domain: Domain = Domain.GENERAL
+    questions_asked: list[str] = Field(default_factory=list, description="IDs of questions presented in this turn")
+    questions_answered: list[str] = Field(default_factory=list, description="IDs of questions answered in this turn")
     timestamp: datetime = Field(default_factory=datetime.now)
 
 
@@ -145,6 +147,8 @@ class Session(BaseModel):
     turns: list[ConversationTurn] = Field(default_factory=list)
     prior_context: str = Field(default="", description="Pre-fetched context from knowledge graph")
     prior_knowledge: list[KnowledgeItem] = Field(default_factory=list, description="Related knowledge items")
+    referenced_dates: list[datetime] = Field(default_factory=list, description="Dates referenced in this session")
+    pending_questions: list[PendingQuestion] = Field(default_factory=list, description="Pending questions for the user")
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
@@ -238,6 +242,44 @@ class ToolCall(BaseModel):
     arguments: dict[str, Any]
 
 
+class QuestionKind(str, Enum):
+    """Type of question to ask the user."""
+
+    CONTRADICTION = "contradiction"  # 矛盾の確認
+    CHANGE = "change"               # 変更の確認
+    MISSING = "missing"             # 不足情報の補完
+    CLARIFICATION = "clarification" # 曖昧な情報の明確化
+
+
+class QuestionStatus(str, Enum):
+    """Status of a pending question."""
+
+    PENDING = "pending"      # 未回答
+    ANSWERED = "answered"    # 回答済み
+    SKIPPED = "skipped"      # スキップ
+    EXPIRED = "expired"      # 期限切れ
+
+
+class PendingQuestion(BaseModel):
+    """A question pending user response, tracked across turns."""
+
+    id: str = Field(..., description="Unique identifier for the question")
+    kind: QuestionKind = Field(..., description="Type of question")
+    question: str = Field(..., description="The question text to ask the user")
+    context: str = Field(default="", description="Background context for the question")
+    related_fact_id: str | None = Field(default=None, description="ID of the related fact in KG")
+    related_entity: str | None = Field(default=None, description="Related entity name")
+    priority: int = Field(default=0, description="Priority (higher = more important)")
+    status: QuestionStatus = Field(default=QuestionStatus.PENDING, description="Current status")
+    answer: str | None = Field(default=None, description="User's answer text")
+    session_id: str | None = Field(default=None, description="Session where this was created")
+    asked_at: datetime | None = Field(default=None, description="When the question was presented")
+    answered_at: datetime | None = Field(default=None, description="When the user answered")
+    created_at: datetime = Field(default_factory=datetime.now, description="When the question was created")
+
+    model_config = {"ser_json_always": True}
+
+
 class ConsistencyIssueKind(str, Enum):
     """Type of consistency issue."""
 
@@ -245,10 +287,23 @@ class ConsistencyIssueKind(str, Enum):
     CHANGE = "change"  # Information has changed/updated
 
 
+class ConsistencyIssueStatus(str, Enum):
+    """Status of a consistency issue."""
+
+    UNRESOLVED = "unresolved"  # Not yet resolved
+    RESOLVED = "resolved"  # Resolved by user action
+    IGNORED = "ignored"  # User chose to ignore
+
+
 class ConsistencyIssue(BaseModel):
     """A detected consistency issue between current and past information."""
 
+    id: str | None = Field(default=None, description="Unique identifier for the issue")
     kind: ConsistencyIssueKind = Field(..., description="Type of issue")
+    status: ConsistencyIssueStatus = Field(
+        default=ConsistencyIssueStatus.UNRESOLVED,
+        description="Current resolution status"
+    )
     title: str = Field(..., description="Brief title of the issue")
     fact_id: str | None = Field(default=None, description="ID of the related fact in KG")
     previous_text: str = Field(..., description="What was said before")
@@ -257,6 +312,11 @@ class ConsistencyIssue(BaseModel):
     current_source: str = Field(default="現在の会話", description="Source of current info")
     suggested_question: str = Field(default="", description="Question to clarify")
     confidence: float = Field(default=0.7, ge=0.0, le=1.0, description="Confidence in detection")
+    # Resolution tracking
+    resolution: str | None = Field(default=None, description="Resolution action: accept_current, keep_previous, ignore")
+    resolved_at: datetime | None = Field(default=None, description="When the issue was resolved")
+    session_id: str | None = Field(default=None, description="Session where this was detected")
+    created_at: datetime = Field(default_factory=datetime.now, description="When the issue was detected")
 
     model_config = {"ser_json_always": True}
 
@@ -272,6 +332,14 @@ class AgentResponse(BaseModel):
     consistency_issues: list[ConsistencyIssue] = Field(
         default_factory=list,
         description="Detected consistency issues with past knowledge"
+    )
+    pending_questions: list[PendingQuestion] = Field(
+        default_factory=list,
+        description="Pending questions for the user (includes missing info, contradictions, etc.)"
+    )
+    questions_answered: list[str] = Field(
+        default_factory=list,
+        description="IDs of questions answered in this turn"
     )
 
     model_config = {"ser_json_always": True}
@@ -512,5 +580,44 @@ class TagMergeResult(BaseModel):
     merged_count: int = Field(default=0, description="Number of tags merged")
     items_updated: int = Field(default=0, description="Number of item relationships updated")
     aliases_added: list[str] = Field(default_factory=list)
+
+    model_config = {"ser_json_always": True}
+
+
+# ==================== Knowledge Graph Visualization ====================
+
+
+class KnowledgeGraphNode(BaseModel):
+    """A node in the knowledge graph visualization."""
+
+    id: str = Field(..., description="Node ID (tag ID)")
+    name: str = Field(..., description="Tag name")
+    weight: float = Field(default=1.0, ge=0.0, description="Node importance/size weight")
+    color: str | None = Field(default=None, description="Node color (hex)")
+    usage_count: int = Field(default=0, description="Number of items tagged")
+    insight_count: int = Field(default=0, description="Number of insights")
+    document_count: int = Field(default=0, description="Number of documents")
+
+    model_config = {"ser_json_always": True}
+
+
+class KnowledgeGraphEdge(BaseModel):
+    """An edge (relationship) in the knowledge graph visualization."""
+
+    source: str = Field(..., description="Source node ID")
+    target: str = Field(..., description="Target node ID")
+    weight: float = Field(default=1.0, ge=0.0, description="Edge strength/weight")
+    co_occurrence_count: int = Field(default=0, description="Number of shared items")
+
+    model_config = {"ser_json_always": True}
+
+
+class KnowledgeGraphData(BaseModel):
+    """Complete data for knowledge graph visualization."""
+
+    nodes: list[KnowledgeGraphNode] = Field(default_factory=list)
+    edges: list[KnowledgeGraphEdge] = Field(default_factory=list)
+    total_tags: int = Field(default=0, description="Total number of tags")
+    total_connections: int = Field(default=0, description="Total number of connections")
 
     model_config = {"ser_json_always": True}
