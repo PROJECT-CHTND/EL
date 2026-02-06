@@ -21,10 +21,17 @@ from pydantic import BaseModel
 from el_core import ELAgent
 from el_core.document_parser import DocumentParser, truncate_content, chunk_document
 from el_core.schemas import (
+    ConsistencyIssue,
+    ConsistencyIssueKind,
+    ConsistencyIssueStatus,
     Document,
     DocumentChunk,
     DocumentStatus,
+    ExtractedFact,
     KnowledgeStats,
+    PendingQuestion,
+    QuestionKind,
+    QuestionStatus,
     Tag,
     TaggedItem,
     TaggedItemType,
@@ -132,7 +139,9 @@ class MessageRequest(BaseModel):
 
 class ConsistencyIssueDetail(BaseModel):
     """Consistency issue detail for API response."""
+    id: str | None = None  # Issue ID for resolution
     kind: str  # "contradiction" or "change"
+    status: str = "unresolved"  # "unresolved", "resolved", "ignored"
     title: str
     fact_id: str | None = None  # ID of the related fact for resolution
     previous_text: str
@@ -141,6 +150,10 @@ class ConsistencyIssueDetail(BaseModel):
     current_source: str
     suggested_question: str
     confidence: float
+    resolution: str | None = None
+    resolved_at: str | None = None
+    session_id: str | None = None
+    created_at: str | None = None
     
     model_config = {"ser_json_always": True}
 
@@ -153,6 +166,25 @@ class AggregationSuggestion(BaseModel):
     message: str
 
 
+class PendingQuestionDetail(BaseModel):
+    """Pending question detail for API response."""
+    id: str
+    kind: str  # "contradiction", "change", "missing", "clarification"
+    question: str
+    context: str = ""
+    related_fact_id: str | None = None
+    related_entity: str | None = None
+    priority: int = 0
+    status: str = "pending"
+    answer: str | None = None
+    session_id: str | None = None
+    asked_at: str | None = None
+    answered_at: str | None = None
+    created_at: str | None = None
+
+    model_config = {"ser_json_always": True}
+
+
 class MessageResponse(BaseModel):
     response: str
     domain: str
@@ -163,6 +195,10 @@ class MessageResponse(BaseModel):
     knowledge_detail: list[KnowledgeDetail] = []
     # Consistency issues detected
     consistency_issues: list[ConsistencyIssueDetail] = []
+    # Pending questions for the user
+    pending_questions: list[PendingQuestionDetail] = []
+    # IDs of questions answered in this turn
+    questions_answered: list[str] = []
     # Aggregation suggestion (when threshold exceeded)
     aggregation_suggestion: AggregationSuggestion | None = None
     
@@ -307,10 +343,12 @@ async def send_message(session_id: str, request: MessageRequest) -> MessageRespo
         for item in response.knowledge_used
     ]
 
-    # Build consistency issues list
+    # Build consistency issues list with full details including IDs
     consistency_issues_detail = [
         ConsistencyIssueDetail(
+            id=issue.id,
             kind=issue.kind.value,
+            status=issue.status.value,
             title=issue.title,
             fact_id=issue.fact_id,
             previous_text=issue.previous_text,
@@ -319,6 +357,10 @@ async def send_message(session_id: str, request: MessageRequest) -> MessageRespo
             current_source=issue.current_source,
             suggested_question=issue.suggested_question,
             confidence=issue.confidence,
+            resolution=issue.resolution,
+            resolved_at=issue.resolved_at.isoformat() if issue.resolved_at else None,
+            session_id=issue.session_id,
+            created_at=issue.created_at.isoformat() if issue.created_at else None,
         )
         for issue in response.consistency_issues
     ]
@@ -342,6 +384,26 @@ async def send_message(session_id: str, request: MessageRequest) -> MessageRespo
         except Exception as e:
             logger.warning(f"Failed to check aggregation threshold: {e}")
 
+    # Build pending questions list
+    pending_questions_detail = [
+        PendingQuestionDetail(
+            id=q.id,
+            kind=q.kind.value,
+            question=q.question,
+            context=q.context,
+            related_fact_id=q.related_fact_id,
+            related_entity=q.related_entity,
+            priority=q.priority,
+            status=q.status.value,
+            answer=q.answer,
+            session_id=q.session_id,
+            asked_at=q.asked_at.isoformat() if q.asked_at else None,
+            answered_at=q.answered_at.isoformat() if q.answered_at else None,
+            created_at=q.created_at.isoformat() if q.created_at else None,
+        )
+        for q in response.pending_questions
+    ]
+
     return MessageResponse(
         response=response.message,
         domain=response.detected_domain.value,
@@ -350,6 +412,8 @@ async def send_message(session_id: str, request: MessageRequest) -> MessageRespo
         insights_detail=insights_detail,
         knowledge_detail=knowledge_detail,
         consistency_issues=consistency_issues_detail,
+        pending_questions=pending_questions_detail,
+        questions_answered=response.questions_answered,
         aggregation_suggestion=aggregation_suggestion,
     )
 
@@ -488,6 +552,141 @@ async def resume_session(session_id: str, request: ResumeSessionRequest) -> Resu
     except Exception as e:
         logger.error(f"Failed to resume session: {e}")
         raise HTTPException(status_code=500, detail="Failed to resume session")
+
+
+# ==================== Question Management Endpoints ====================
+
+
+class QuestionsListResponse(BaseModel):
+    """Response for listing session questions."""
+    session_id: str
+    questions: list[PendingQuestionDetail] = []
+    total: int = 0
+    pending_count: int = 0
+    answered_count: int = 0
+
+    model_config = {"ser_json_always": True}
+
+
+class SkipQuestionResponse(BaseModel):
+    """Response for skipping a question."""
+    question_id: str
+    status: str = "skipped"
+    message: str = ""
+
+    model_config = {"ser_json_always": True}
+
+
+@app.get("/api/sessions/{session_id}/questions", response_model=QuestionsListResponse)
+async def get_session_questions(
+    session_id: str,
+    status: str | None = None,
+) -> QuestionsListResponse:
+    """Get all questions for a session.
+    
+    Args:
+        session_id: Session ID.
+        status: Optional filter by status (pending, answered, skipped, expired).
+    """
+    if agent is None:
+        raise HTTPException(status_code=503, detail="Agent not initialized")
+
+    session = agent.get_session(session_id)
+
+    questions: list[PendingQuestion] = []
+
+    if session is not None:
+        # Get from in-memory session
+        if status:
+            questions = [q for q in session.pending_questions if q.status.value == status]
+        else:
+            questions = session.pending_questions
+    elif kg_store is not None:
+        # Fall back to KG store
+        try:
+            questions = await kg_store.get_pending_questions(session_id, status=status)
+        except Exception as e:
+            logger.warning(f"Failed to get questions from KG: {e}")
+    else:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    questions_detail = [
+        PendingQuestionDetail(
+            id=q.id,
+            kind=q.kind.value,
+            question=q.question,
+            context=q.context,
+            related_fact_id=q.related_fact_id,
+            related_entity=q.related_entity,
+            priority=q.priority,
+            status=q.status.value,
+            answer=q.answer,
+            session_id=q.session_id,
+            asked_at=q.asked_at.isoformat() if q.asked_at else None,
+            answered_at=q.answered_at.isoformat() if q.answered_at else None,
+            created_at=q.created_at.isoformat() if q.created_at else None,
+        )
+        for q in questions
+    ]
+
+    pending_count = sum(1 for q in questions if q.status == QuestionStatus.PENDING)
+    answered_count = sum(1 for q in questions if q.status == QuestionStatus.ANSWERED)
+
+    return QuestionsListResponse(
+        session_id=session_id,
+        questions=questions_detail,
+        total=len(questions),
+        pending_count=pending_count,
+        answered_count=answered_count,
+    )
+
+
+@app.post("/api/sessions/{session_id}/questions/{question_id}/skip", response_model=SkipQuestionResponse)
+async def skip_question(session_id: str, question_id: str) -> SkipQuestionResponse:
+    """Skip a pending question.
+    
+    Args:
+        session_id: Session ID.
+        question_id: Question ID to skip.
+    """
+    if agent is None:
+        raise HTTPException(status_code=503, detail="Agent not initialized")
+
+    session = agent.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Find the question
+    question = next((q for q in session.pending_questions if q.id == question_id), None)
+    if question is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    if question.status != QuestionStatus.PENDING:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Question is already {question.status.value}"
+        )
+
+    from datetime import datetime
+    # Update in-memory status
+    question.status = QuestionStatus.SKIPPED
+    question.answered_at = datetime.now()
+
+    # Update in KG
+    if kg_store:
+        try:
+            await kg_store.update_question_status(
+                question_id=question_id,
+                status="skipped",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to update question status in KG: {e}")
+
+    return SkipQuestionResponse(
+        question_id=question_id,
+        status="skipped",
+        message="質問をスキップしました。" if session.language != "English" else "Question skipped.",
+    )
 
 
 # WebSocket for real-time chat
@@ -1023,6 +1222,77 @@ async def delete_document(document_id: str):
         raise HTTPException(status_code=500, detail="Failed to delete document")
 
 
+@app.post("/api/documents/{document_id}/review", response_model=StartSessionResponse)
+async def start_document_review_session(
+    document_id: str,
+    request: StartSessionRequest,
+):
+    """Start a review session for an uploaded document.
+    
+    ドキュメントアップロード後に、抽出された事実と過去の知識を照合し、
+    矛盾点や不足情報について確認するセッションを開始します。
+    """
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+    
+    if agent is None:
+        raise HTTPException(status_code=503, detail="Agent not available")
+    
+    try:
+        # Get document
+        document = await kg_store.get_document(document_id)
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        if document.status != DocumentStatus.COMPLETED:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Document processing not completed. Status: {document.status.value}"
+            )
+        
+        # Get extracted facts from document
+        insights = await kg_store.get_insights_for_document(document_id)
+        
+        # Convert Insight to ExtractedFact for consistency check
+        extracted_facts: list[ExtractedFact] = []
+        for insight in insights:
+            extracted_facts.append(ExtractedFact(
+                subject=insight.subject,
+                predicate=insight.predicate,
+                object=insight.object,
+                confidence=insight.confidence,
+                source_context="",
+                event_date=insight.event_date,
+                event_date_end=insight.event_date_end,
+                date_type=insight.date_type,
+            ))
+        
+        # Create review session
+        session_id, opening_message, consistency_issues = await agent.create_document_review_session(
+            user_id=request.user_id,
+            document_id=document_id,
+            document_filename=document.filename,
+            extracted_facts=extracted_facts,
+            language=request.language,
+        )
+        
+        # Get session for prior knowledge count
+        session = agent.get_session(session_id)
+        prior_knowledge_count = len(session.prior_knowledge) if session else 0
+        
+        return StartSessionResponse(
+            session_id=session_id,
+            opening_message=opening_message,
+            prior_knowledge_count=prior_knowledge_count,
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to start document review session: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start review session: {str(e)}")
+
+
 # ==================== Document Chunk API (Phase 2) ====================
 
 
@@ -1509,6 +1779,143 @@ async def summarize_entity(entity: str):
         raise HTTPException(status_code=500, detail="Failed to generate entity summary")
 
 
+# ==================== Conflict API Endpoints ====================
+
+
+class ResolveConflictRequest(BaseModel):
+    """Request to resolve a conflict."""
+    resolution: str  # "accept_current", "keep_previous", "ignore"
+    new_value: str | None = None  # For manual resolution
+
+
+class ConflictListResponse(BaseModel):
+    """Response for conflict list."""
+    conflicts: list[ConsistencyIssueDetail]
+    total: int
+    unresolved: int
+
+
+def _issue_to_detail(issue: ConsistencyIssue) -> ConsistencyIssueDetail:
+    """Convert ConsistencyIssue to ConsistencyIssueDetail."""
+    return ConsistencyIssueDetail(
+        id=issue.id,
+        kind=issue.kind.value,
+        status=issue.status.value,
+        title=issue.title,
+        fact_id=issue.fact_id,
+        previous_text=issue.previous_text,
+        previous_source=issue.previous_source,
+        current_text=issue.current_text,
+        current_source=issue.current_source,
+        suggested_question=issue.suggested_question,
+        confidence=issue.confidence,
+        resolution=issue.resolution,
+        resolved_at=issue.resolved_at.isoformat() if issue.resolved_at else None,
+        session_id=issue.session_id,
+        created_at=issue.created_at.isoformat() if issue.created_at else None,
+    )
+
+
+@app.get("/api/conflicts", response_model=ConflictListResponse)
+async def list_conflicts(include_resolved: bool = False, limit: int = 100):
+    """List all consistency issues/conflicts.
+    
+    Args:
+        include_resolved: Whether to include resolved conflicts.
+        limit: Maximum number of conflicts to return.
+    """
+    if not kg_store:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+    
+    try:
+        all_conflicts = await kg_store.get_all_conflicts(include_resolved=include_resolved, limit=limit)
+        unresolved = await kg_store.get_unresolved_conflicts(limit=limit)
+        
+        return ConflictListResponse(
+            conflicts=[_issue_to_detail(c) for c in all_conflicts],
+            total=len(all_conflicts),
+            unresolved=len(unresolved),
+        )
+    except Exception as e:
+        logger.error(f"Failed to list conflicts: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list conflicts")
+
+
+@app.get("/api/conflicts/{conflict_id}", response_model=ConsistencyIssueDetail)
+async def get_conflict(conflict_id: str):
+    """Get a specific conflict by ID."""
+    if not kg_store:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+    
+    try:
+        conflict = await kg_store.get_consistency_issue(conflict_id)
+        if not conflict:
+            raise HTTPException(status_code=404, detail="Conflict not found")
+        
+        return _issue_to_detail(conflict)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get conflict: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get conflict")
+
+
+@app.post("/api/conflicts/{conflict_id}/resolve")
+async def resolve_conflict(conflict_id: str, request: ResolveConflictRequest):
+    """Resolve a consistency issue/conflict.
+    
+    Args:
+        conflict_id: The conflict ID to resolve.
+        request: Resolution details (resolution type and optional new value).
+    """
+    if not kg_store:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+    
+    # Validate resolution type
+    valid_resolutions = ["accept_current", "keep_previous", "ignore"]
+    if request.resolution not in valid_resolutions:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid resolution. Must be one of: {valid_resolutions}"
+        )
+    
+    try:
+        success = await kg_store.mark_conflict_resolved(
+            conflict_id=conflict_id,
+            resolution=request.resolution,
+            new_value=request.new_value,
+        )
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Conflict not found")
+        
+        # Get the updated conflict
+        updated = await kg_store.get_consistency_issue(conflict_id)
+        if updated:
+            return _issue_to_detail(updated)
+        
+        return {"status": "resolved", "conflict_id": conflict_id, "resolution": request.resolution}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to resolve conflict: {e}")
+        raise HTTPException(status_code=500, detail="Failed to resolve conflict")
+
+
+@app.get("/api/facts/{fact_id}/conflicts", response_model=list[ConsistencyIssueDetail])
+async def get_fact_conflicts(fact_id: str):
+    """Get all conflicts associated with a specific fact."""
+    if not kg_store:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+    
+    try:
+        conflicts = await kg_store.get_conflicts_for_fact(fact_id)
+        return [_issue_to_detail(c) for c in conflicts]
+    except Exception as e:
+        logger.error(f"Failed to get conflicts for fact: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get conflicts for fact")
+
+
 # ==================== Tag API Endpoints ====================
 
 
@@ -1655,6 +2062,85 @@ def _tagged_item_to_response(item: TaggedItem) -> TaggedItemResponse:
         object=item.object,
         filename=item.filename,
     )
+
+
+# ==================== Knowledge Graph Visualization ====================
+
+
+class KnowledgeGraphNodeResponse(BaseModel):
+    """Response for a knowledge graph node (tag)."""
+    id: str
+    name: str
+    weight: float
+    color: str | None
+    usage_count: int
+    insight_count: int
+    document_count: int
+
+
+class KnowledgeGraphEdgeResponse(BaseModel):
+    """Response for a knowledge graph edge (relationship)."""
+    source: str
+    target: str
+    weight: float
+    co_occurrence_count: int
+
+
+class KnowledgeGraphDataResponse(BaseModel):
+    """Response for knowledge graph visualization data."""
+    nodes: list[KnowledgeGraphNodeResponse]
+    edges: list[KnowledgeGraphEdgeResponse]
+    total_tags: int
+    total_connections: int
+
+
+@app.get("/api/knowledge-graph", tags=["knowledge-graph"])
+async def get_knowledge_graph(
+    min_usage: int = 0,
+    limit: int = 100,
+) -> KnowledgeGraphDataResponse:
+    """Get knowledge graph data for visualization.
+
+    Returns nodes (tags) and edges (co-occurrence relationships).
+    Tags that appear on the same Insight/Document are considered connected.
+    """
+    if kg_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+
+    try:
+        data = await kg_store.get_knowledge_graph_data(
+            min_usage_count=min_usage,
+            limit=limit,
+        )
+
+        return KnowledgeGraphDataResponse(
+            nodes=[
+                KnowledgeGraphNodeResponse(
+                    id=node.id,
+                    name=node.name,
+                    weight=node.weight,
+                    color=node.color,
+                    usage_count=node.usage_count,
+                    insight_count=node.insight_count,
+                    document_count=node.document_count,
+                )
+                for node in data.nodes
+            ],
+            edges=[
+                KnowledgeGraphEdgeResponse(
+                    source=edge.source,
+                    target=edge.target,
+                    weight=edge.weight,
+                    co_occurrence_count=edge.co_occurrence_count,
+                )
+                for edge in data.edges
+            ],
+            total_tags=data.total_tags,
+            total_connections=data.total_connections,
+        )
+    except Exception as e:
+        logger.error(f"Failed to get knowledge graph data: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get knowledge graph data")
 
 
 @app.get("/api/tags", tags=["tags"])

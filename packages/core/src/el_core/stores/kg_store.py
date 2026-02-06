@@ -11,6 +11,9 @@ from typing import Any
 from neo4j import AsyncGraphDatabase, AsyncDriver
 
 from el_core.schemas import (
+    ConsistencyIssue,
+    ConsistencyIssueKind,
+    ConsistencyIssueStatus,
     DateType,
     Document,
     DocumentChunk,
@@ -20,8 +23,14 @@ from el_core.schemas import (
     FactVersion,
     FactWithHistory,
     Insight,
+    KnowledgeGraphData,
+    KnowledgeGraphEdge,
+    KnowledgeGraphNode,
     KnowledgeItem,
     KnowledgeStats,
+    PendingQuestion,
+    QuestionKind,
+    QuestionStatus,
     SessionMetadata,
     SessionSummary,
     Tag,
@@ -1040,6 +1049,291 @@ class KnowledgeGraphStore:
         logger.info(f"Resolved consistency issue for fact {fact_id}: {resolution}")
         return result
 
+    # ==================== ConsistencyIssue Management ====================
+
+    async def save_consistency_issue(
+        self,
+        issue: ConsistencyIssue,
+        session_id: str | None = None,
+    ) -> str:
+        """Save a consistency issue to the knowledge graph.
+
+        Args:
+            issue: The consistency issue to save.
+            session_id: Session where the issue was detected.
+
+        Returns:
+            The ID of the created ConsistencyIssue node.
+        """
+        issue_id = issue.id or str(uuid.uuid4())
+        now = datetime.now()
+
+        cypher = """
+        CREATE (ci:ConsistencyIssue {
+            id: $id,
+            kind: $kind,
+            status: $status,
+            title: $title,
+            fact_id: $fact_id,
+            previous_text: $previous_text,
+            previous_source: $previous_source,
+            current_text: $current_text,
+            current_source: $current_source,
+            suggested_question: $suggested_question,
+            confidence: $confidence,
+            resolution: $resolution,
+            resolved_at: $resolved_at,
+            session_id: $session_id,
+            created_at: $created_at
+        })
+        WITH ci
+        OPTIONAL MATCH (i:Insight {id: $fact_id})
+        FOREACH (_ IN CASE WHEN i IS NOT NULL THEN [1] ELSE [] END |
+            CREATE (i)-[:HAS_CONFLICT]->(ci)
+        )
+        RETURN ci.id as id
+        """
+
+        async with self.driver.session() as session:
+            result = await session.run(
+                cypher,
+                id=issue_id,
+                kind=issue.kind.value,
+                status=issue.status.value,
+                title=issue.title,
+                fact_id=issue.fact_id,
+                previous_text=issue.previous_text,
+                previous_source=issue.previous_source,
+                current_text=issue.current_text,
+                current_source=issue.current_source,
+                suggested_question=issue.suggested_question,
+                confidence=issue.confidence,
+                resolution=issue.resolution,
+                resolved_at=issue.resolved_at.isoformat() if issue.resolved_at else None,
+                session_id=session_id or issue.session_id,
+                created_at=now.isoformat(),
+            )
+            record = await result.single()
+            logger.info(f"Saved consistency issue {issue_id} for fact {issue.fact_id}")
+            return record["id"] if record else issue_id
+
+    async def get_consistency_issue(self, issue_id: str) -> ConsistencyIssue | None:
+        """Get a consistency issue by ID.
+
+        Args:
+            issue_id: The issue ID.
+
+        Returns:
+            The ConsistencyIssue or None if not found.
+        """
+        cypher = """
+        MATCH (ci:ConsistencyIssue {id: $id})
+        RETURN ci
+        """
+
+        async with self.driver.session() as session:
+            result = await session.run(cypher, id=issue_id)
+            record = await result.single()
+
+            if not record:
+                return None
+
+            node = record["ci"]
+            return self._node_to_consistency_issue(node)
+
+    async def get_unresolved_conflicts(
+        self,
+        fact_id: str | None = None,
+        limit: int = 50,
+    ) -> list[ConsistencyIssue]:
+        """Get all unresolved consistency issues.
+
+        Args:
+            fact_id: Optional fact ID to filter by.
+            limit: Maximum number of issues to return.
+
+        Returns:
+            List of unresolved ConsistencyIssue objects.
+        """
+        if fact_id:
+            cypher = """
+            MATCH (ci:ConsistencyIssue {status: 'unresolved', fact_id: $fact_id})
+            RETURN ci
+            ORDER BY ci.created_at DESC
+            LIMIT $limit
+            """
+            params = {"fact_id": fact_id, "limit": limit}
+        else:
+            cypher = """
+            MATCH (ci:ConsistencyIssue {status: 'unresolved'})
+            RETURN ci
+            ORDER BY ci.created_at DESC
+            LIMIT $limit
+            """
+            params = {"limit": limit}
+
+        async with self.driver.session() as session:
+            result = await session.run(cypher, **params)
+            records = await result.data()
+
+            return [
+                self._node_to_consistency_issue(record["ci"])
+                for record in records
+            ]
+
+    async def get_all_conflicts(
+        self,
+        include_resolved: bool = False,
+        limit: int = 100,
+    ) -> list[ConsistencyIssue]:
+        """Get all consistency issues.
+
+        Args:
+            include_resolved: Whether to include resolved issues.
+            limit: Maximum number of issues to return.
+
+        Returns:
+            List of ConsistencyIssue objects.
+        """
+        if include_resolved:
+            cypher = """
+            MATCH (ci:ConsistencyIssue)
+            RETURN ci
+            ORDER BY ci.created_at DESC
+            LIMIT $limit
+            """
+        else:
+            cypher = """
+            MATCH (ci:ConsistencyIssue)
+            WHERE ci.status = 'unresolved'
+            RETURN ci
+            ORDER BY ci.created_at DESC
+            LIMIT $limit
+            """
+
+        async with self.driver.session() as session:
+            result = await session.run(cypher, limit=limit)
+            records = await result.data()
+
+            return [
+                self._node_to_consistency_issue(record["ci"])
+                for record in records
+            ]
+
+    async def mark_conflict_resolved(
+        self,
+        conflict_id: str,
+        resolution: str,
+        new_value: str | None = None,
+    ) -> bool:
+        """Mark a consistency issue as resolved.
+
+        Args:
+            conflict_id: The conflict ID to resolve.
+            resolution: Resolution action: "accept_current", "keep_previous", "ignore".
+            new_value: For manual resolution, the new value to set.
+
+        Returns:
+            True if the conflict was found and updated.
+        """
+        now = datetime.now()
+
+        # First, get the conflict to find the associated fact
+        conflict = await self.get_consistency_issue(conflict_id)
+        if not conflict:
+            logger.warning(f"Conflict {conflict_id} not found")
+            return False
+
+        # Update the conflict status
+        cypher = """
+        MATCH (ci:ConsistencyIssue {id: $id})
+        SET ci.status = $status,
+            ci.resolution = $resolution,
+            ci.resolved_at = $resolved_at
+        RETURN ci
+        """
+
+        status = ConsistencyIssueStatus.IGNORED if resolution == "ignore" else ConsistencyIssueStatus.RESOLVED
+
+        async with self.driver.session() as session:
+            result = await session.run(
+                cypher,
+                id=conflict_id,
+                status=status.value,
+                resolution=resolution,
+                resolved_at=now.isoformat(),
+            )
+            record = await result.single()
+
+            if not record:
+                return False
+
+            # If there's an associated fact and resolution is not "ignore", update the fact
+            if conflict.fact_id and resolution != "ignore":
+                try:
+                    await self.resolve_consistency_issue(
+                        fact_id=conflict.fact_id,
+                        resolution=resolution,
+                        new_value=new_value,
+                        session_id=conflict.session_id,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to update fact {conflict.fact_id}: {e}")
+
+            logger.info(f"Resolved conflict {conflict_id} with action: {resolution}")
+            return True
+
+    async def get_conflicts_for_fact(self, fact_id: str) -> list[ConsistencyIssue]:
+        """Get all conflicts associated with a fact.
+
+        Args:
+            fact_id: The fact ID.
+
+        Returns:
+            List of ConsistencyIssue objects for this fact.
+        """
+        cypher = """
+        MATCH (ci:ConsistencyIssue {fact_id: $fact_id})
+        RETURN ci
+        ORDER BY ci.created_at DESC
+        """
+
+        async with self.driver.session() as session:
+            result = await session.run(cypher, fact_id=fact_id)
+            records = await result.data()
+
+            return [
+                self._node_to_consistency_issue(record["ci"])
+                for record in records
+            ]
+
+    def _node_to_consistency_issue(self, node: dict) -> ConsistencyIssue:
+        """Convert a Neo4j node to a ConsistencyIssue object.
+
+        Args:
+            node: Neo4j node dict.
+
+        Returns:
+            ConsistencyIssue object.
+        """
+        return ConsistencyIssue(
+            id=node.get("id"),
+            kind=ConsistencyIssueKind(node.get("kind", "change")),
+            status=ConsistencyIssueStatus(node.get("status", "unresolved")),
+            title=node.get("title", ""),
+            fact_id=node.get("fact_id"),
+            previous_text=node.get("previous_text", ""),
+            previous_source=node.get("previous_source", ""),
+            current_text=node.get("current_text", ""),
+            current_source=node.get("current_source", "現在の会話"),
+            suggested_question=node.get("suggested_question", ""),
+            confidence=node.get("confidence", 0.7),
+            resolution=node.get("resolution"),
+            resolved_at=datetime.fromisoformat(node["resolved_at"]) if node.get("resolved_at") else None,
+            session_id=node.get("session_id"),
+            created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
+        )
+
     # ==================== Document Management ====================
 
     async def save_document(self, document: Document) -> str:
@@ -1251,6 +1545,257 @@ class KnowledgeGraphStore:
             if deleted:
                 logger.info(f"Deleted document: {document_id}")
             return deleted
+
+    async def link_session_to_document(self, session_id: str, document_id: str) -> None:
+        """Link a session to a document for review purposes.
+        
+        Args:
+            session_id: Session ID.
+            document_id: Document ID.
+        """
+        cypher = """
+        MATCH (s:Session {id: $session_id})
+        MATCH (d:Document {id: $document_id})
+        MERGE (s)-[:REVIEWS_DOCUMENT]->(d)
+        """
+        
+        async with self.driver.session() as session:
+            await session.run(cypher, session_id=session_id, document_id=document_id)
+            logger.info(f"Linked session {session_id} to document {document_id}")
+
+    # ==================== PendingQuestion Persistence ====================
+
+    async def save_pending_question(
+        self,
+        question: PendingQuestion,
+        session_id: str,
+    ) -> str:
+        """Save a pending question to the knowledge graph.
+
+        Args:
+            question: The PendingQuestion to save.
+            session_id: Session ID this question belongs to.
+
+        Returns:
+            The ID of the saved PendingQuestion node.
+        """
+        question_id = question.id or str(uuid.uuid4())
+        now = datetime.now()
+
+        cypher = """
+        CREATE (pq:PendingQuestion {
+            id: $id,
+            kind: $kind,
+            question: $question,
+            context: $context,
+            related_fact_id: $related_fact_id,
+            related_entity: $related_entity,
+            priority: $priority,
+            status: $status,
+            answer: $answer,
+            session_id: $session_id,
+            asked_at: $asked_at,
+            answered_at: $answered_at,
+            created_at: $created_at
+        })
+        WITH pq
+        OPTIONAL MATCH (s:Session {id: $session_id})
+        FOREACH (_ IN CASE WHEN s IS NOT NULL THEN [1] ELSE [] END |
+            CREATE (s)-[:HAS_QUESTION]->(pq)
+        )
+        RETURN pq.id as id
+        """
+
+        async with self.driver.session() as session:
+            result = await session.run(
+                cypher,
+                id=question_id,
+                kind=question.kind.value,
+                question=question.question,
+                context=question.context,
+                related_fact_id=question.related_fact_id,
+                related_entity=question.related_entity,
+                priority=question.priority,
+                status=question.status.value,
+                answer=question.answer,
+                session_id=session_id,
+                asked_at=question.asked_at.isoformat() if question.asked_at else None,
+                answered_at=question.answered_at.isoformat() if question.answered_at else None,
+                created_at=now.isoformat(),
+            )
+            record = await result.single()
+            logger.info(f"Saved pending question {question_id} for session {session_id}")
+            return record["id"] if record else question_id
+
+    async def get_pending_questions(
+        self,
+        session_id: str,
+        status: str | None = None,
+    ) -> list[PendingQuestion]:
+        """Get pending questions for a session.
+
+        Args:
+            session_id: Session ID to query.
+            status: Optional status filter (e.g., "pending", "answered").
+
+        Returns:
+            List of PendingQuestion objects.
+        """
+        if status:
+            cypher = """
+            MATCH (pq:PendingQuestion {session_id: $session_id, status: $status})
+            RETURN pq
+            ORDER BY pq.priority DESC, pq.created_at ASC
+            """
+            params: dict[str, Any] = {"session_id": session_id, "status": status}
+        else:
+            cypher = """
+            MATCH (pq:PendingQuestion {session_id: $session_id})
+            RETURN pq
+            ORDER BY pq.priority DESC, pq.created_at ASC
+            """
+            params = {"session_id": session_id}
+
+        async with self.driver.session() as session:
+            result = await session.run(cypher, **params)
+            records = await result.data()
+
+            questions: list[PendingQuestion] = []
+            for record in records:
+                node = record["pq"]
+                try:
+                    q = PendingQuestion(
+                        id=node["id"],
+                        kind=QuestionKind(node["kind"]),
+                        question=node["question"],
+                        context=node.get("context", ""),
+                        related_fact_id=node.get("related_fact_id"),
+                        related_entity=node.get("related_entity"),
+                        priority=node.get("priority", 0),
+                        status=QuestionStatus(node.get("status", "pending")),
+                        answer=node.get("answer"),
+                        session_id=node.get("session_id"),
+                        asked_at=datetime.fromisoformat(node["asked_at"]) if node.get("asked_at") else None,
+                        answered_at=datetime.fromisoformat(node["answered_at"]) if node.get("answered_at") else None,
+                        created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
+                    )
+                    questions.append(q)
+                except Exception as e:
+                    logger.warning(f"Failed to parse PendingQuestion node: {e}")
+                    continue
+
+            return questions
+
+    async def get_unresolved_questions_for_session(
+        self,
+        session_id: str,
+    ) -> list[PendingQuestion]:
+        """Get unresolved (pending) questions for a session.
+
+        Args:
+            session_id: Session ID to query.
+
+        Returns:
+            List of PendingQuestion objects with status 'pending'.
+        """
+        return await self.get_pending_questions(session_id, status="pending")
+
+    async def update_question_status(
+        self,
+        question_id: str,
+        status: str,
+        answer: str | None = None,
+    ) -> None:
+        """Update the status and answer of a pending question.
+
+        Args:
+            question_id: ID of the question to update.
+            status: New status value (pending, answered, skipped, expired).
+            answer: Optional answer text.
+        """
+        now = datetime.now()
+
+        cypher = """
+        MATCH (pq:PendingQuestion {id: $id})
+        SET pq.status = $status,
+            pq.answer = CASE WHEN $answer IS NOT NULL THEN $answer ELSE pq.answer END,
+            pq.answered_at = CASE WHEN $status IN ['answered', 'skipped'] THEN $now ELSE pq.answered_at END
+        RETURN pq.id as id
+        """
+
+        async with self.driver.session() as session:
+            result = await session.run(
+                cypher,
+                id=question_id,
+                status=status,
+                answer=answer,
+                now=now.isoformat(),
+            )
+            record = await result.single()
+            if record:
+                logger.info(f"Updated question {question_id} status to {status}")
+            else:
+                logger.warning(f"Question {question_id} not found for status update")
+
+    async def save_pending_questions_batch(
+        self,
+        questions: list[PendingQuestion],
+        session_id: str,
+    ) -> None:
+        """Save multiple pending questions in a batch operation.
+
+        Args:
+            questions: List of PendingQuestion objects to save.
+            session_id: Session ID they belong to.
+        """
+        if not questions:
+            return
+
+        cypher = """
+        UNWIND $questions AS q
+        CREATE (pq:PendingQuestion {
+            id: q.id,
+            kind: q.kind,
+            question: q.question,
+            context: q.context,
+            related_fact_id: q.related_fact_id,
+            related_entity: q.related_entity,
+            priority: q.priority,
+            status: q.status,
+            answer: q.answer,
+            session_id: $session_id,
+            asked_at: q.asked_at,
+            answered_at: q.answered_at,
+            created_at: q.created_at
+        })
+        WITH pq
+        OPTIONAL MATCH (s:Session {id: $session_id})
+        FOREACH (_ IN CASE WHEN s IS NOT NULL THEN [1] ELSE [] END |
+            CREATE (s)-[:HAS_QUESTION]->(pq)
+        )
+        """
+
+        now = datetime.now()
+        questions_data = []
+        for q in questions:
+            questions_data.append({
+                "id": q.id or str(uuid.uuid4()),
+                "kind": q.kind.value,
+                "question": q.question,
+                "context": q.context,
+                "related_fact_id": q.related_fact_id,
+                "related_entity": q.related_entity,
+                "priority": q.priority,
+                "status": q.status.value,
+                "answer": q.answer,
+                "asked_at": q.asked_at.isoformat() if q.asked_at else None,
+                "answered_at": q.answered_at.isoformat() if q.answered_at else None,
+                "created_at": now.isoformat(),
+            })
+
+        async with self.driver.session() as session:
+            await session.run(cypher, questions=questions_data, session_id=session_id)
+            logger.info(f"Batch saved {len(questions)} pending questions for session {session_id}")
 
     async def link_fact_to_document(self, fact_id: str, document_id: str) -> None:
         """Link a fact to its source document.
@@ -1903,6 +2448,11 @@ class KnowledgeGraphStore:
             "CREATE INDEX tag_id IF NOT EXISTS FOR (t:Tag) ON (t.id)",
             "CREATE INDEX tag_name IF NOT EXISTS FOR (t:Tag) ON (t.name)",
             "CREATE INDEX tag_usage IF NOT EXISTS FOR (t:Tag) ON (t.usage_count)",
+            # ConsistencyIssue indexes
+            "CREATE INDEX conflict_id IF NOT EXISTS FOR (c:ConsistencyIssue) ON (c.id)",
+            "CREATE INDEX conflict_status IF NOT EXISTS FOR (c:ConsistencyIssue) ON (c.status)",
+            "CREATE INDEX conflict_fact IF NOT EXISTS FOR (c:ConsistencyIssue) ON (c.fact_id)",
+            "CREATE INDEX conflict_session IF NOT EXISTS FOR (c:ConsistencyIssue) ON (c.session_id)",
             """
             CREATE FULLTEXT INDEX insight_search IF NOT EXISTS 
             FOR (i:Insight) ON EACH [i.predicate]
@@ -2790,3 +3340,103 @@ class KnowledgeGraphStore:
         if existing:
             return existing
         return await self.create_tag(name)
+
+    # ==================== Knowledge Graph Visualization ====================
+
+    async def get_knowledge_graph_data(
+        self,
+        min_usage_count: int = 0,
+        limit: int = 100,
+    ) -> KnowledgeGraphData:
+        """Get knowledge graph data for visualization.
+
+        Returns nodes (tags) and edges (co-occurrence relationships between tags).
+        Tags that appear on the same Insight/Document are considered connected.
+
+        Args:
+            min_usage_count: Minimum usage count to include a tag.
+            limit: Maximum number of nodes.
+
+        Returns:
+            KnowledgeGraphData with nodes and edges.
+        """
+        # Get all tags as nodes with their stats
+        node_cypher = """
+        MATCH (t:Tag)
+        WHERE t.usage_count >= $min_usage_count
+        OPTIONAL MATCH (i:Insight)-[:HAS_TAG]->(t)
+        OPTIONAL MATCH (d:Document)-[:HAS_TAG]->(t)
+        WITH t, count(DISTINCT i) AS insight_count, count(DISTINCT d) AS document_count
+        RETURN t.id AS id,
+               t.name AS name,
+               t.color AS color,
+               t.usage_count AS usage_count,
+               insight_count,
+               document_count
+        ORDER BY t.usage_count DESC
+        LIMIT $limit
+        """
+
+        nodes: list[KnowledgeGraphNode] = []
+        node_ids: set[str] = set()
+
+        async with self.driver.session() as session:
+            result = await session.run(
+                node_cypher,
+                min_usage_count=min_usage_count,
+                limit=limit,
+            )
+            async for record in result:
+                node_id = record["id"]
+                usage = record["usage_count"] or 0
+                # Calculate weight based on usage (log scale for better visualization)
+                weight = 1.0 + (usage ** 0.5) * 0.5 if usage > 0 else 1.0
+
+                nodes.append(KnowledgeGraphNode(
+                    id=node_id,
+                    name=record["name"],
+                    weight=weight,
+                    color=record["color"],
+                    usage_count=usage,
+                    insight_count=record["insight_count"] or 0,
+                    document_count=record["document_count"] or 0,
+                ))
+                node_ids.add(node_id)
+
+        # Get co-occurrence edges (tags that appear on the same item)
+        edge_cypher = """
+        MATCH (t1:Tag)<-[:HAS_TAG]-(item)-[:HAS_TAG]->(t2:Tag)
+        WHERE t1.id < t2.id
+          AND t1.id IN $node_ids
+          AND t2.id IN $node_ids
+        WITH t1.id AS source, t2.id AS target, count(item) AS co_count
+        WHERE co_count > 0
+        RETURN source, target, co_count
+        ORDER BY co_count DESC
+        """
+
+        edges: list[KnowledgeGraphEdge] = []
+
+        if node_ids:
+            async with self.driver.session() as session:
+                result = await session.run(edge_cypher, node_ids=list(node_ids))
+                async for record in result:
+                    co_count = record["co_count"]
+                    # Weight based on co-occurrence count
+                    weight = 1.0 + (co_count ** 0.5) * 0.3
+
+                    edges.append(KnowledgeGraphEdge(
+                        source=record["source"],
+                        target=record["target"],
+                        weight=weight,
+                        co_occurrence_count=co_count,
+                    ))
+
+        logger.info(f"Knowledge graph: {len(nodes)} nodes, {len(edges)} edges")
+
+        return KnowledgeGraphData(
+            nodes=nodes,
+            edges=edges,
+            total_tags=len(nodes),
+            total_connections=len(edges),
+        )

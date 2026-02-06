@@ -20,6 +20,9 @@ from el_core.schemas import (
     ExtractedFact,
     Insight,
     KnowledgeItem,
+    PendingQuestion,
+    QuestionKind,
+    QuestionStatus,
     Session,
     SessionSummary,
     Tag,
@@ -199,6 +202,9 @@ def extract_dates_from_text(text: str) -> tuple[Any, Any]:
     jp_full_date = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日", text)
     jp_month_day = re.search(r"(\d{1,2})月(\d{1,2})日", text)
     jp_month_only = re.search(r"(\d{1,2})月(?!日)", text)
+    
+    # Slash format: 1/12, 12/25 (month/day) - common Japanese diary format
+    slash_date = re.search(r"(?<!\d)(\d{1,2})/(\d{1,2})(?!\d)", text)
 
     # English date patterns
     en_full_date = re.search(
@@ -251,6 +257,14 @@ def extract_dates_from_text(text: str) -> tuple[Any, Any]:
             month, day = int(jp_month_day.group(1)), int(jp_month_day.group(2))
             date = datetime(current_year, month, day)
             return date, date
+
+        # Slash format: 1/12 -> January 12
+        if slash_date:
+            month, day = int(slash_date.group(1)), int(slash_date.group(2))
+            # Validate month and day
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                date = datetime(current_year, month, day)
+                return date, date
 
         # English month + day
         if en_month_day:
@@ -522,20 +536,30 @@ class ELAgent:
             # Session is already loaded with conversation history
             logger.info(f"Resuming session {session_id} from memory ({len(existing_session.turns)} turns)")
             
+            # Count pending questions
+            pending_count = sum(
+                1 for q in existing_session.pending_questions
+                if q.status == QuestionStatus.PENDING
+            )
+            
             # Generate resume message
             lang = existing_session.language
             if lang.lower() in ("english", "en"):
                 resume_msg = (
                     f"Welcome back! We were discussing \"{existing_session.topic}\". "
                     f"You have {len(existing_session.turns)} exchanges so far. "
-                    f"Let's continue!"
                 )
+                if pending_count > 0:
+                    resume_msg += f"You have {pending_count} unanswered questions from our last conversation. "
+                resume_msg += "Let's continue!"
             else:
                 resume_msg = (
                     f"「{existing_session.topic}」の続きですね。\n"
                     f"これまで{len(existing_session.turns)}ターンの会話がありました。\n"
-                    f"続けましょう！"
                 )
+                if pending_count > 0:
+                    resume_msg += f"前回の未回答質問が{pending_count}件あります。\n"
+                resume_msg += "続けましょう！"
             
             return session_id, resume_msg, existing_session.prior_knowledge
         
@@ -587,18 +611,32 @@ class ELAgent:
             session.message_history.append({"role": "user", "content": turn_data["user_message"]})
             session.message_history.append({"role": "assistant", "content": turn_data["assistant_response"]})
 
+        # Restore pending questions from Neo4j
+        restored_questions: list[PendingQuestion] = []
+        try:
+            restored_questions = await self._kg_store.get_unresolved_questions_for_session(session_id)
+            if restored_questions:
+                session.pending_questions = restored_questions
+                logger.info(f"Restored {len(restored_questions)} pending questions for session {session_id}")
+        except Exception as e:
+            logger.warning(f"Failed to restore pending questions: {e}")
+
         # Store in active sessions
         self._sessions[session_id] = session
 
         # Generate resume message
         has_history = len(conversation_turns) > 0
+        pending_count = len(restored_questions)
+
         if detected_lang.lower() in ("english", "en"):
             if has_history:
                 resume_msg = (
                     f"Welcome back! We were discussing \"{metadata.topic}\". "
                     f"Your previous {len(conversation_turns)} exchanges have been restored. "
-                    f"Let's continue!"
                 )
+                if pending_count > 0:
+                    resume_msg += f"You have {pending_count} unanswered questions from our last conversation. "
+                resume_msg += "Let's continue!"
             else:
                 resume_msg = (
                     f"Welcome back! We were discussing \"{metadata.topic}\". "
@@ -609,15 +647,17 @@ class ELAgent:
                 resume_msg = (
                     f"「{metadata.topic}」の続きですね。お帰りなさい！\n"
                     f"前回の{len(conversation_turns)}ターンの会話を復元しました。\n"
-                    f"続けましょう！"
                 )
+                if pending_count > 0:
+                    resume_msg += f"前回の未回答質問が{pending_count}件あります。\n"
+                resume_msg += "続けましょう！"
             else:
                 resume_msg = (
                     f"「{metadata.topic}」の続きですね。お帰りなさい！\n"
                     f"（※会話履歴が見つかりませんでしたが、記録した事実は引き継いでいます）"
                 )
 
-        logger.info(f"Resumed session {session_id} for user {user_id} ({len(conversation_turns)} turns restored)")
+        logger.info(f"Resumed session {session_id} for user {user_id} ({len(conversation_turns)} turns, {pending_count} pending questions restored)")
 
         return session_id, resume_msg, session_insights
 
@@ -783,6 +823,14 @@ Example:
     ) -> AgentResponse:
         """Generate a response to a user message.
 
+        Enhanced flow:
+        1. Retrieve pending questions from session
+        2. Analyze if user message answers any pending questions
+        3. Apply answers to knowledge graph automatically
+        4. Detect new consistency issues and missing information
+        5. Generate response with question context
+        6. Track questions asked/answered in the turn
+
         Args:
             session_id: Session identifier.
             user_message: The user's message.
@@ -794,11 +842,46 @@ Example:
         if session is None:
             raise ValueError(f"Session {session_id} not found")
 
-        # Pre-search knowledge graph for potential consistency issues
+        from datetime import datetime
+
+        # ===== Step 1: Analyze answers to pending questions =====
+        answered_question_ids: list[str] = []
+        existing_pending = [q for q in session.pending_questions if q.status == QuestionStatus.PENDING]
+
+        if existing_pending:
+            answer_analyses = await self._analyze_answer_to_questions(
+                user_message=user_message,
+                pending_questions=existing_pending,
+                language=session.language,
+            )
+
+            # ===== Step 2: Apply answers to knowledge graph =====
+            pending_map = {q.id: q for q in existing_pending}
+            for analysis in answer_analyses:
+                qid = analysis["question_id"]
+                pq = pending_map.get(qid)
+                if pq and analysis.get("answered"):
+                    # Update question status
+                    pq.status = QuestionStatus.ANSWERED
+                    pq.answer = analysis.get("new_value") or user_message
+                    pq.answered_at = datetime.now()
+                    answered_question_ids.append(qid)
+
+                    # Apply to knowledge graph
+                    await self._apply_answer_to_knowledge(analysis, pq, session_id)
+
+                    logger.info(f"Question {qid} answered: action={analysis.get('action')}")
+                elif pq and analysis.get("action") == "skip":
+                    pq.status = QuestionStatus.SKIPPED
+                    answered_question_ids.append(qid)
+
+        # ===== Step 3: Pre-search knowledge graph =====
         pre_search_knowledge: list[KnowledgeItem] = []
         consistency_issues: list[ConsistencyIssue] = []
+        new_pending_questions: list[PendingQuestion] = []
         consistency_context = ""
-        chunk_context = ""  # Phase 2: Context from document chunks
+        questions_context = ""
+        chunk_context = ""
         relevant_chunks: list[DocumentChunk] = []
         
         if self._kg_store:
@@ -806,29 +889,33 @@ Example:
                 # Extract dates from user message for temporal filtering
                 start_date, end_date = extract_dates_from_text(user_message)
                 
+                # If a date is detected, save it to session for future reference
+                if start_date:
+                    if start_date not in session.referenced_dates:
+                        session.referenced_dates.append(start_date)
+                        logger.info(f"Added date to session context: {start_date}")
+                
+                # If no date in current message, use previously referenced dates
+                if not start_date and session.referenced_dates:
+                    start_date = session.referenced_dates[-1]
+                    end_date = start_date
+                    logger.info(f"Using previously referenced date: {start_date}")
+                
                 if start_date or end_date:
-                    # User mentioned a date - search by date range first
                     logger.info(f"Detected date reference: {start_date} to {end_date}")
                     
-                    # Phase 2: Search for document chunks by date (for accurate original content)
                     if start_date and end_date and start_date == end_date:
-                        # Exact date match
                         relevant_chunks = await self._kg_store.get_chunks_by_date(start_date)
                     elif start_date and end_date:
-                        # Date range
                         relevant_chunks = await self._kg_store.get_chunks_by_date_range(start_date, end_date)
                     elif start_date:
                         relevant_chunks = await self._kg_store.get_chunks_by_date(start_date)
                     
                     if relevant_chunks:
-                        # Format chunk content as context for LLM
                         chunk_context = self._format_chunk_context(relevant_chunks, session.language)
                         logger.info(f"Found {len(relevant_chunks)} relevant chunks for date query")
-                        # IMPORTANT: When we have chunk original content, skip fact search
-                        # to avoid LLM mixing accurate chunk content with potentially inaccurate extracted facts
                         logger.info("Skipping fact search - using chunk original content as authoritative source")
                     else:
-                        # No chunks found, fall back to extracted facts
                         date_filtered_knowledge = await self._kg_store.search_by_date_range(
                             start_date=start_date,
                             end_date=end_date,
@@ -837,8 +924,6 @@ Example:
                         )
                         pre_search_knowledge.extend(date_filtered_knowledge)
                 
-                # Only do keyword search if we don't have chunk content
-                # Chunk original content is the authoritative source
                 if not relevant_chunks:
                     keyword_knowledge = await self._kg_store.search(
                         user_message,
@@ -847,58 +932,73 @@ Example:
                         end_date=end_date,
                     )
                     
-                    # Merge results, avoiding duplicates
                     seen_ids = {k.id for k in pre_search_knowledge}
                     for item in keyword_knowledge:
                         if item.id not in seen_ids:
                             pre_search_knowledge.append(item)
                             seen_ids.add(item.id)
-                
-                if pre_search_knowledge:
-                    # Check for consistency issues BEFORE generating response
-                    consistency_issues = await self._detect_consistency_issues(
-                        user_message=user_message,
-                        knowledge_used=pre_search_knowledge,
-                        language=session.language,
+
+                # ===== Step 4: Detect new questions (contradictions + missing info) =====
+                detected_domain = self._detect_domain(user_message, [])
+                new_pending_questions, consistency_issues = await self._generate_all_questions(
+                    user_message=user_message,
+                    knowledge_used=pre_search_knowledge,
+                    extracted_facts=None,
+                    domain=detected_domain,
+                    language=session.language,
+                    session_id=session_id,
+                )
+
+                # If consistency issues found, add context for LLM
+                if consistency_issues:
+                    consistency_context = self._format_consistency_context(
+                        consistency_issues, session.language
                     )
-                    
-                    # If issues found, add context for LLM to address them
-                    if consistency_issues:
-                        consistency_context = self._format_consistency_context(
-                            consistency_issues, session.language
-                        )
-                        logger.info(f"Found {len(consistency_issues)} consistency issues to address")
-                        
+                    logger.info(f"Found {len(consistency_issues)} consistency issues to address")
+
             except Exception as e:
                 logger.warning(f"Pre-search for consistency failed: {e}")
 
-        # Build message history with prior context
+        # ===== Step 5: Build pending questions context for LLM =====
+        # Combine remaining unanswered questions + new questions
+        still_pending = [q for q in session.pending_questions if q.status == QuestionStatus.PENDING]
+        all_active_questions = still_pending + new_pending_questions
+
+        # Sort by priority and deduplicate
+        seen_question_texts = set()
+        deduped_questions: list[PendingQuestion] = []
+        for q in sorted(all_active_questions, key=lambda x: x.priority, reverse=True):
+            if q.question not in seen_question_texts:
+                deduped_questions.append(q)
+                seen_question_texts.add(q.question)
+        all_active_questions = deduped_questions
+
+        if all_active_questions:
+            questions_context = self._format_questions_context(all_active_questions, session.language)
+
+        # ===== Step 6: Build messages for LLM =====
         system_content = get_system_prompt(session.language)
         if session.prior_context:
             system_content += session.prior_context
         
-        # Phase 2: Add chunk content as context (for accurate document reference)
         if chunk_context:
             system_content += chunk_context
         
-        # Add consistency context if there are issues to address
         if consistency_context:
             system_content += consistency_context
+
+        if questions_context:
+            system_content += questions_context
         
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_content},
         ]
 
-        # Add conversation history
         messages.extend(session.message_history)
-
-        # Add current user message
         messages.append({"role": "user", "content": user_message})
 
         # Set up tool executor with session_id for insight tracking
         tool_executor = ToolExecutor(self._kg_store, session_id=session_id)
-        
-        # Add pre-searched knowledge to tool executor so it's included in response
         tool_executor.used_knowledge.extend(pre_search_knowledge)
 
         # Call LLM with tools
@@ -911,13 +1011,27 @@ Example:
         # Detect domain from response and tool usage
         detected_domain = self._detect_domain(user_message, tool_results)
 
-        # Create conversation turn
+        # ===== Step 7: Update session state =====
+        # Mark asked_at for new questions
+        questions_asked_ids: list[str] = []
+        for q in new_pending_questions:
+            q.asked_at = datetime.now()
+            questions_asked_ids.append(q.id)
+
+        # Update session's pending_questions: keep answered/skipped for history, add new ones
+        session.pending_questions = [
+            q for q in session.pending_questions
+        ] + new_pending_questions
+
+        # Create conversation turn with question tracking
         turn = ConversationTurn(
             user_message=user_message,
             assistant_response=response_text,
             insights_saved=tool_executor.saved_insights,
             knowledge_used=tool_executor.used_knowledge,
             detected_domain=detected_domain,
+            questions_asked=questions_asked_ids,
+            questions_answered=answered_question_ids,
         )
         session.add_turn(turn)
 
@@ -951,11 +1065,36 @@ Example:
             for tr in tool_results
         ]
 
+        # ===== Step 8: Persist questions to KG =====
+        if self._kg_store and new_pending_questions:
+            try:
+                await self._kg_store.save_pending_questions_batch(
+                    new_pending_questions, session_id
+                )
+            except Exception as e:
+                logger.warning(f"Failed to persist pending questions: {e}")
+
+        # Persist answered question status updates
+        if self._kg_store and answered_question_ids:
+            for qid in answered_question_ids:
+                try:
+                    pq = next((q for q in session.pending_questions if q.id == qid), None)
+                    if pq:
+                        await self._kg_store.update_question_status(
+                            question_id=qid,
+                            status=pq.status.value,
+                            answer=pq.answer,
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to update question {qid} status in KG: {e}")
+
         logger.info(
             f"Session {session_id}: processed message, "
             f"saved {len(tool_executor.saved_insights)} insights, "
             f"used {len(tool_executor.used_knowledge)} knowledge items, "
-            f"detected {len(consistency_issues)} consistency issues"
+            f"detected {len(consistency_issues)} consistency issues, "
+            f"new questions {len(new_pending_questions)}, "
+            f"answered {len(answered_question_ids)}"
         )
 
         return AgentResponse(
@@ -965,6 +1104,8 @@ Example:
             knowledge_used=tool_executor.used_knowledge,
             detected_domain=detected_domain,
             consistency_issues=consistency_issues,
+            pending_questions=[q for q in all_active_questions if q.status == QuestionStatus.PENDING],
+            questions_answered=answered_question_ids,
         )
 
     def _format_chunk_context(
@@ -1069,6 +1210,61 @@ Example:
                 context += f"  確認すべき質問：「{issue.suggested_question}」\n\n"
             
             context += "この変更/矛盾について自然に確認してください。\n"
+
+        return context
+
+    def _format_questions_context(
+        self,
+        questions: list[PendingQuestion],
+        language: str,
+    ) -> str:
+        """Format pending questions as context for LLM.
+
+        Args:
+            questions: List of active pending questions.
+            language: Session language.
+
+        Returns:
+            Formatted context string to append to system prompt.
+        """
+        if not questions:
+            return ""
+
+        # Only include top priority questions (max 5)
+        top_questions = questions[:5]
+
+        if language.lower() in ("english", "en"):
+            context = "\n\n### Pending Questions to Address\n"
+            context += "The following questions are waiting for user response.\n"
+            context += "If the user's message answers any of these, acknowledge it. "
+            context += "Otherwise, naturally incorporate the highest-priority unanswered question.\n\n"
+
+            for q in top_questions:
+                kind_label = {
+                    QuestionKind.CONTRADICTION: "CONTRADICTION",
+                    QuestionKind.CHANGE: "CHANGE",
+                    QuestionKind.MISSING: "MISSING INFO",
+                    QuestionKind.CLARIFICATION: "CLARIFICATION",
+                }.get(q.kind, "QUESTION")
+                context += f"- [{kind_label}] {q.question}\n"
+                if q.context:
+                    context += f"  Context: {q.context}\n"
+        else:
+            context = "\n\n### 未回答の質問\n"
+            context += "以下の質問がユーザーからの回答を待っています。\n"
+            context += "ユーザーのメッセージがこれらに回答している場合は確認してください。\n"
+            context += "そうでなければ、優先度の高い未回答質問を自然に会話に組み込んでください。\n\n"
+
+            for q in top_questions:
+                kind_label = {
+                    QuestionKind.CONTRADICTION: "矛盾",
+                    QuestionKind.CHANGE: "変更",
+                    QuestionKind.MISSING: "不足情報",
+                    QuestionKind.CLARIFICATION: "確認",
+                }.get(q.kind, "質問")
+                context += f"- 【{kind_label}】{q.question}\n"
+                if q.context:
+                    context += f"  背景: {q.context}\n"
 
         return context
 
@@ -1225,6 +1421,7 @@ Example:
         user_message: str,
         knowledge_used: list[KnowledgeItem],
         language: str,
+        session_id: str | None = None,
     ) -> list[ConsistencyIssue]:
         """Detect potential consistency issues between user message and past knowledge.
 
@@ -1232,6 +1429,7 @@ Example:
             user_message: Current user message.
             knowledge_used: Knowledge items retrieved for this turn.
             language: Session language.
+            session_id: Session ID for persistence.
 
         Returns:
             List of detected consistency issues.
@@ -1300,6 +1498,8 @@ Change example:
 
         try:
             import json
+            from uuid import uuid4
+            
             response = await self._llm.chat(messages=messages)  # type: ignore
             content = response.content or "[]"
             
@@ -1326,7 +1526,9 @@ Change example:
                     if fact_id and fact_id not in knowledge_map:
                         fact_id = None  # Invalid ID, set to None
                     
-                    issues.append(ConsistencyIssue(
+                    # Create issue with ID and session_id
+                    issue = ConsistencyIssue(
+                        id=str(uuid4()),
                         kind=kind,
                         title=item.get("title", "整合性チェック"),
                         fact_id=fact_id,
@@ -1336,7 +1538,18 @@ Change example:
                         current_source="現在の会話",
                         suggested_question=item.get("suggested_question", ""),
                         confidence=0.7,
-                    ))
+                        session_id=session_id,
+                    )
+                    issues.append(issue)
+                    
+                    # Persist to knowledge graph
+                    if self._kg_store:
+                        try:
+                            await self._kg_store.save_consistency_issue(issue, session_id)
+                            logger.info(f"Saved consistency issue {issue.id} to KG")
+                        except Exception as save_error:
+                            logger.warning(f"Failed to save consistency issue to KG: {save_error}")
+                            
                 except Exception as e:
                     logger.warning(f"Failed to parse consistency issue: {e}")
                     continue
@@ -1349,6 +1562,446 @@ Change example:
         except Exception as e:
             logger.warning(f"Failed to detect consistency issues: {e}")
             return []
+
+    def _consistency_issue_to_pending_question(
+        self,
+        issue: ConsistencyIssue,
+        session_id: str | None = None,
+    ) -> PendingQuestion:
+        """Convert a ConsistencyIssue to a PendingQuestion for unified tracking.
+
+        Args:
+            issue: The consistency issue to convert.
+            session_id: Session ID for the question.
+
+        Returns:
+            A PendingQuestion instance.
+        """
+        kind_map = {
+            ConsistencyIssueKind.CONTRADICTION: QuestionKind.CONTRADICTION,
+            ConsistencyIssueKind.CHANGE: QuestionKind.CHANGE,
+        }
+        return PendingQuestion(
+            id=issue.id or str(uuid.uuid4()),
+            kind=kind_map.get(issue.kind, QuestionKind.CONTRADICTION),
+            question=issue.suggested_question,
+            context=f"以前: 「{issue.previous_text}」 → 現在: 「{issue.current_text}」",
+            related_fact_id=issue.fact_id,
+            related_entity=None,
+            priority=8 if issue.kind == ConsistencyIssueKind.CONTRADICTION else 5,
+            status=QuestionStatus.PENDING,
+            session_id=session_id,
+            created_at=issue.created_at,
+        )
+
+    async def _detect_missing_information(
+        self,
+        extracted_facts: list[ExtractedFact] | None,
+        user_message: str,
+        existing_knowledge: list[KnowledgeItem],
+        domain: Domain,
+        language: str,
+        session_id: str | None = None,
+    ) -> list[PendingQuestion]:
+        """Detect missing information that should be asked about.
+
+        Analyzes extracted facts and existing knowledge to identify gaps.
+        Uses LLM to determine what information is expected but missing.
+
+        Args:
+            extracted_facts: Facts extracted from a document or message.
+            user_message: The current user message for context.
+            existing_knowledge: Previously stored knowledge items.
+            domain: The detected domain of the conversation.
+            language: Session language.
+            session_id: Session ID for persistence.
+
+        Returns:
+            List of PendingQuestion objects for missing information.
+        """
+        # Build context from facts and existing knowledge
+        facts_text = ""
+        if extracted_facts:
+            facts_text = "\n".join([
+                f"- {f.subject}は{f.predicate}「{f.object}」"
+                for f in extracted_facts
+            ])
+
+        knowledge_text = ""
+        if existing_knowledge:
+            knowledge_text = "\n".join([
+                f"- [ID:{item.id}] {item.subject}は{item.predicate}「{item.object}」"
+                for item in existing_knowledge
+            ])
+
+        if language.lower() in ("english", "en"):
+            system_prompt = """You are a missing information detector. Analyze the given facts and existing knowledge to identify important gaps.
+
+Think about what information SHOULD exist but is missing. Consider:
+- If a project is mentioned, do we know: responsible person, deadline, status, priority?
+- If a person is mentioned, do we know: role, team, contact info?
+- If an event is mentioned, do we know: date, location, participants, outcome?
+- If a decision is mentioned, do we know: reason, alternatives considered, who decided?
+- If a problem is mentioned, do we know: impact, root cause, resolution plan?
+
+Only suggest questions for GENUINELY USEFUL missing information. Don't ask trivial questions.
+
+Output ONLY valid JSON array. Each item should have:
+- kind: "missing" or "clarification"
+- question: The question to ask (natural, conversational)
+- context: Why this information would be useful
+- related_entity: The entity this question is about (or null)
+- priority: 1-10 (10 = most important)
+
+If no important information is missing, output: []
+
+Example:
+[{"kind":"missing","question":"Who is responsible for Project A?","context":"Project A was mentioned but no responsible person is assigned","related_entity":"Project A","priority":7}]"""
+        else:
+            system_prompt = """あなたは不足情報の検出者です。与えられた事実と既存の知識を分析し、重要な情報の欠落を特定してください。
+
+存在すべきだが不足している情報を考えてください：
+- プロジェクトが言及されている場合：担当者、締め切り、ステータス、優先度はわかっているか？
+- 人物が言及されている場合：役割、チーム、連絡先はわかっているか？
+- イベントが言及されている場合：日時、場所、参加者、結果はわかっているか？
+- 決定事項が言及されている場合：理由、検討した代替案、誰が決めたかはわかっているか？
+- 問題が言及されている場合：影響範囲、根本原因、解決計画はわかっているか？
+
+**本当に有用な**不足情報のみ質問してください。些末な質問は避けてください。
+
+有効なJSON配列のみを出力してください。各項目には以下を含めます：
+- kind: "missing" または "clarification"
+- question: 質問文（自然な会話調で）
+- context: この情報がなぜ有用か
+- related_entity: 質問が関連するエンティティ（またはnull）
+- priority: 1〜10（10が最も重要）
+
+重要な不足情報がない場合は空の配列を出力: []
+
+例:
+[{"kind":"missing","question":"プロジェクトAの担当者は誰ですか？","context":"プロジェクトAが言及されていますが担当者が不明","related_entity":"プロジェクトA","priority":7}]"""
+
+        user_prompt_parts = []
+        if facts_text:
+            user_prompt_parts.append(f"【新しい事実】\n{facts_text}")
+        if knowledge_text:
+            user_prompt_parts.append(f"【既存の知識】\n{knowledge_text}")
+        if user_message:
+            user_prompt_parts.append(f"【ユーザーメッセージ】\n{user_message}")
+        user_prompt_parts.append(f"【ドメイン】\n{domain.value}")
+
+        user_prompt = "\n\n".join(user_prompt_parts) + "\n\n上記の情報から、不足している重要な情報を特定してください。"
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        try:
+            import json
+            from datetime import datetime
+
+            response = await self._llm.chat(messages=messages)  # type: ignore
+            content = response.content or "[]"
+
+            # Clean up response
+            content = content.strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[-1]
+            if content.endswith("```"):
+                content = content.rsplit("```", 1)[0]
+            content = content.strip()
+
+            items_data = json.loads(content)
+            if not isinstance(items_data, list):
+                return []
+
+            questions: list[PendingQuestion] = []
+            for item in items_data:
+                try:
+                    kind_str = item.get("kind", "missing")
+                    kind = QuestionKind.MISSING if kind_str == "missing" else QuestionKind.CLARIFICATION
+
+                    question = PendingQuestion(
+                        id=str(uuid.uuid4()),
+                        kind=kind,
+                        question=item.get("question", ""),
+                        context=item.get("context", ""),
+                        related_fact_id=None,
+                        related_entity=item.get("related_entity"),
+                        priority=min(10, max(1, int(item.get("priority", 5)))),
+                        status=QuestionStatus.PENDING,
+                        session_id=session_id,
+                        created_at=datetime.now(),
+                    )
+                    questions.append(question)
+                except Exception as e:
+                    logger.warning(f"Failed to parse missing info question: {e}")
+                    continue
+
+            if questions:
+                logger.info(f"Detected {len(questions)} missing information questions")
+
+            return questions
+
+        except Exception as e:
+            logger.warning(f"Failed to detect missing information: {e}")
+            return []
+
+    async def _analyze_answer_to_questions(
+        self,
+        user_message: str,
+        pending_questions: list[PendingQuestion],
+        language: str,
+    ) -> list[dict]:
+        """Analyze user's message to determine if it answers any pending questions.
+
+        Uses LLM to match user responses to pending questions and determine
+        what knowledge updates should be made.
+
+        Args:
+            user_message: The user's message.
+            pending_questions: List of currently pending questions.
+            language: Session language.
+
+        Returns:
+            List of dicts with keys:
+                - question_id: ID of the answered question
+                - answered: True if the question was answered
+                - action: "accept_current" | "keep_previous" | "new_value" | "skip"
+                - new_value: The new value from the user's answer (if any)
+                - confidence: How confident we are in this analysis
+        """
+        if not pending_questions:
+            return []
+
+        # Build question list for LLM
+        questions_text = "\n".join([
+            f"- [ID:{q.id}] (種類:{q.kind.value}) {q.question}\n  背景: {q.context}"
+            for q in pending_questions
+        ])
+
+        if language.lower() in ("english", "en"):
+            system_prompt = """You are a response analyzer. Determine if the user's message answers any of the pending questions.
+
+For each question that is addressed by the user's message, provide:
+- question_id: The ID of the question being answered
+- answered: true if the user provided an answer, false if unclear
+- action: 
+  - "accept_current" = user confirms the new/current information is correct
+  - "keep_previous" = user says the old information was correct  
+  - "new_value" = user provides a completely different value
+  - "skip" = user explicitly skips/ignores the question
+- new_value: The specific value from the user's answer (null if not applicable)
+- confidence: 0.0-1.0 how confident you are
+
+Output ONLY valid JSON array. Only include questions that are actually addressed. If no questions are answered, output: []
+
+Example:
+[{"question_id":"abc-123","answered":true,"action":"accept_current","new_value":null,"confidence":0.9}]"""
+        else:
+            system_prompt = """あなたは回答分析者です。ユーザーのメッセージが未回答の質問に答えているかを判定してください。
+
+ユーザーのメッセージが対応している各質問について以下を提供してください：
+- question_id: 回答されている質問のID
+- answered: ユーザーが回答を提供した場合true、不明確な場合false
+- action:
+  - "accept_current" = ユーザーが新しい/現在の情報が正しいと確認
+  - "keep_previous" = ユーザーが古い情報が正しいと回答
+  - "new_value" = ユーザーがまったく異なる値を提供
+  - "skip" = ユーザーが明示的に質問をスキップ/無視
+- new_value: ユーザーの回答から得られた具体的な値（該当しない場合はnull）
+- confidence: 0.0〜1.0で確信度
+
+有効なJSON配列のみを出力してください。実際に対応されている質問のみ含めてください。
+回答がない場合は空の配列を出力: []
+
+例:
+[{"question_id":"abc-123","answered":true,"action":"accept_current","new_value":null,"confidence":0.9}]"""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"【未回答の質問】\n{questions_text}\n\n【ユーザーのメッセージ】\n{user_message}"},
+        ]
+
+        try:
+            import json
+
+            response = await self._llm.chat(messages=messages)  # type: ignore
+            content = response.content or "[]"
+
+            # Clean up response
+            content = content.strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[-1]
+            if content.endswith("```"):
+                content = content.rsplit("```", 1)[0]
+            content = content.strip()
+
+            results = json.loads(content)
+            if not isinstance(results, list):
+                return []
+
+            # Validate question_ids
+            valid_ids = {q.id for q in pending_questions}
+            validated_results = []
+            for r in results:
+                if r.get("question_id") in valid_ids:
+                    validated_results.append({
+                        "question_id": r["question_id"],
+                        "answered": bool(r.get("answered", False)),
+                        "action": r.get("action", "accept_current"),
+                        "new_value": r.get("new_value"),
+                        "confidence": min(1.0, max(0.0, float(r.get("confidence", 0.7)))),
+                    })
+
+            if validated_results:
+                logger.info(f"Analyzed {len(validated_results)} answers from user message")
+
+            return validated_results
+
+        except Exception as e:
+            logger.warning(f"Failed to analyze answer to questions: {e}")
+            return []
+
+    async def _apply_answer_to_knowledge(
+        self,
+        answer_analysis: dict,
+        pending_question: PendingQuestion,
+        session_id: str,
+    ) -> None:
+        """Apply a user's answer to update the knowledge graph.
+
+        Args:
+            answer_analysis: Result from _analyze_answer_to_questions for one question.
+            pending_question: The question that was answered.
+            session_id: Session ID for tracking.
+        """
+        if not self._kg_store:
+            return
+
+        action = answer_analysis.get("action", "")
+        new_value = answer_analysis.get("new_value")
+        from datetime import datetime
+
+        try:
+            if pending_question.kind in (QuestionKind.CONTRADICTION, QuestionKind.CHANGE):
+                # Handle contradiction/change resolution
+                fact_id = pending_question.related_fact_id
+                if fact_id:
+                    if action == "accept_current":
+                        # Update the fact to the new value
+                        await self._kg_store.update_fact(
+                            fact_id=fact_id,
+                            new_value=new_value or pending_question.context.split("→")[-1].strip().strip("「」 "),
+                            source=f"session:{session_id}",
+                        )
+                        await self._kg_store.set_fact_status(fact_id, "active")
+                        logger.info(f"Updated fact {fact_id}: accepted current value")
+                    elif action == "keep_previous":
+                        # Keep existing fact, mark as active
+                        await self._kg_store.set_fact_status(fact_id, "active")
+                        logger.info(f"Kept previous value for fact {fact_id}")
+                    elif action == "new_value" and new_value:
+                        # Set a completely new value
+                        await self._kg_store.update_fact(
+                            fact_id=fact_id,
+                            new_value=new_value,
+                            source=f"session:{session_id}",
+                        )
+                        await self._kg_store.set_fact_status(fact_id, "active")
+                        logger.info(f"Set new value for fact {fact_id}: {new_value}")
+
+            elif pending_question.kind == QuestionKind.MISSING and new_value:
+                # Save new insight for missing information
+                from el_core.schemas import Insight
+                insight = Insight(
+                    subject=pending_question.related_entity or "unknown",
+                    predicate="has_info",
+                    object=new_value,
+                    confidence=0.9,
+                    domain=Domain.GENERAL,
+                )
+                await self._kg_store.save_insight(insight, session_id=session_id)
+                logger.info(f"Saved new insight from missing info answer: {new_value[:50]}")
+
+            elif pending_question.kind == QuestionKind.CLARIFICATION and new_value:
+                # Save clarification as insight
+                from el_core.schemas import Insight
+                insight = Insight(
+                    subject=pending_question.related_entity or "unknown",
+                    predicate="clarification",
+                    object=new_value,
+                    confidence=0.85,
+                    domain=Domain.GENERAL,
+                )
+                await self._kg_store.save_insight(insight, session_id=session_id)
+                logger.info(f"Saved clarification: {new_value[:50]}")
+
+        except Exception as e:
+            logger.warning(f"Failed to apply answer to knowledge: {e}")
+
+    async def _generate_all_questions(
+        self,
+        user_message: str,
+        knowledge_used: list[KnowledgeItem],
+        extracted_facts: list[ExtractedFact] | None,
+        domain: Domain,
+        language: str,
+        session_id: str | None = None,
+    ) -> tuple[list[PendingQuestion], list[ConsistencyIssue]]:
+        """Generate all questions (contradictions, changes, missing info) in a unified manner.
+
+        Combines consistency issue detection and missing information detection,
+        returning a unified list of PendingQuestion sorted by priority.
+
+        Args:
+            user_message: Current user message.
+            knowledge_used: Knowledge items retrieved for this turn.
+            extracted_facts: Facts extracted from document or message (optional).
+            domain: Detected domain.
+            language: Session language.
+            session_id: Session ID for persistence.
+
+        Returns:
+            Tuple of (all PendingQuestions sorted by priority, raw ConsistencyIssues).
+        """
+        all_questions: list[PendingQuestion] = []
+        consistency_issues: list[ConsistencyIssue] = []
+
+        # 1. Detect consistency issues (contradictions + changes)
+        if knowledge_used:
+            consistency_issues = await self._detect_consistency_issues(
+                user_message=user_message,
+                knowledge_used=knowledge_used,
+                language=language,
+                session_id=session_id,
+            )
+            # Convert to PendingQuestion
+            for issue in consistency_issues:
+                pq = self._consistency_issue_to_pending_question(issue, session_id)
+                all_questions.append(pq)
+
+        # 2. Detect missing information
+        missing_questions = await self._detect_missing_information(
+            extracted_facts=extracted_facts,
+            user_message=user_message,
+            existing_knowledge=knowledge_used,
+            domain=domain,
+            language=language,
+            session_id=session_id,
+        )
+        all_questions.extend(missing_questions)
+
+        # Sort by priority (highest first)
+        all_questions.sort(key=lambda q: q.priority, reverse=True)
+
+        logger.info(
+            f"Generated {len(all_questions)} total questions: "
+            f"{len(consistency_issues)} consistency + {len(missing_questions)} missing"
+        )
+
+        return all_questions, consistency_issues
 
     # ==================== Document Processing ====================
 
@@ -1525,6 +2178,163 @@ Example:
                 entities=[],
                 domain=Domain.GENERAL,
             )
+
+    async def create_document_review_session(
+        self,
+        user_id: str,
+        document_id: str,
+        document_filename: str,
+        extracted_facts: list[ExtractedFact],
+        language: str | None = None,
+    ) -> tuple[str, str, list[ConsistencyIssue]]:
+        """Create a session for reviewing uploaded document and checking consistency.
+        
+        ドキュメントアップロード後に、抽出された事実と過去の知識を照合し、
+        矛盾点や不足情報について確認するセッションを作成します。
+        
+        Args:
+            user_id: User identifier.
+            document_id: Document ID that was uploaded.
+            document_filename: Original filename.
+            extracted_facts: Facts extracted from the document.
+            language: Language preference. Auto-detected if None.
+            
+        Returns:
+            Tuple of (session_id, opening_message, consistency_issues).
+        """
+        detected_lang = language or "Japanese"
+        session_id = str(uuid.uuid4())
+        
+        # Create session with document review topic
+        topic = f"ドキュメント「{document_filename}」の確認"
+        session = Session(
+            id=session_id,
+            user_id=user_id,
+            topic=topic,
+            language=detected_lang,
+        )
+        
+        # Check each extracted fact against existing knowledge
+        consistency_issues: list[ConsistencyIssue] = []
+        related_knowledge: list[KnowledgeItem] = []
+        
+        if self._kg_store and extracted_facts:
+            for fact in extracted_facts:
+                # Search for related knowledge
+                search_query = f"{fact.subject} {fact.predicate}"
+                related = await self._kg_store.search(
+                    search_query,
+                    limit=5,
+                    start_date=fact.event_date,
+                    end_date=fact.event_date_end,
+                )
+                related_knowledge.extend(related)
+                
+                # Check for consistency issues
+                if related:
+                    fact_text = f"{fact.subject}は{fact.predicate}「{fact.object}」"
+                    issues = await self._detect_consistency_issues(
+                        user_message=fact_text,
+                        knowledge_used=related,
+                        language=detected_lang,
+                        session_id=session_id,
+                    )
+                    consistency_issues.extend(issues)
+        
+        # Store related knowledge in session
+        session.prior_knowledge = related_knowledge
+        session.prior_context = self._format_prior_knowledge(related_knowledge, detected_lang)
+        
+        # Store document_id in session metadata (we'll add a field for this)
+        self._sessions[session_id] = session
+        
+        # Save session metadata to Neo4j
+        if self._kg_store:
+            try:
+                await self._save_session_metadata(session)
+                # Link session to document
+                await self._kg_store.link_session_to_document(session_id, document_id)
+            except Exception as e:
+                logger.warning(f"Failed to save session metadata: {e}")
+        
+        # Generate opening message with consistency issues
+        opening = await self._generate_document_review_opening(
+            session=session,
+            document_filename=document_filename,
+            extracted_facts=extracted_facts,
+            consistency_issues=consistency_issues,
+            language=detected_lang,
+        )
+        
+        logger.info(
+            f"Created document review session {session_id} for document {document_id}: "
+            f"{len(extracted_facts)} facts, {len(consistency_issues)} issues"
+        )
+        
+        return session_id, opening, consistency_issues
+    
+    async def _generate_document_review_opening(
+        self,
+        session: Session,
+        document_filename: str,
+        extracted_facts: list[ExtractedFact],
+        consistency_issues: list[ConsistencyIssue],
+        language: str,
+    ) -> str:
+        """Generate opening message for document review session.
+        
+        Args:
+            session: The session object.
+            document_filename: Name of the uploaded document.
+            extracted_facts: Facts extracted from the document.
+            consistency_issues: Detected consistency issues.
+            language: Session language.
+            
+        Returns:
+            Opening message for the review session.
+        """
+        if language.lower() in ("english", "en"):
+            base_message = (
+                f"I've processed the document \"{document_filename}\" and extracted "
+                f"{len(extracted_facts)} facts. "
+            )
+            
+            if consistency_issues:
+                base_message += (
+                    f"I found {len(consistency_issues)} potential inconsistencies "
+                    f"with your previous records. Let me ask you about these:\n\n"
+                )
+                for i, issue in enumerate(consistency_issues[:5], 1):  # Limit to 5
+                    base_message += f"{i}. {issue.suggested_question}\n"
+                if len(consistency_issues) > 5:
+                    base_message += f"\n... and {len(consistency_issues) - 5} more issues.\n"
+            else:
+                base_message += (
+                    "I've checked these facts against your previous records and "
+                    "they appear consistent. Is there anything you'd like to clarify or add?"
+                )
+        else:
+            base_message = (
+                f"ドキュメント「{document_filename}」を処理し、"
+                f"{len(extracted_facts)}件の事実を抽出しました。\n\n"
+            )
+            
+            if consistency_issues:
+                base_message += (
+                    f"過去の記録と照合したところ、{len(consistency_issues)}件の"
+                    f"矛盾点や変更点が見つかりました。確認させてください：\n\n"
+                )
+                for i, issue in enumerate(consistency_issues[:5], 1):  # 最大5件まで表示
+                    base_message += f"{i}. {issue.suggested_question}\n"
+                if len(consistency_issues) > 5:
+                    base_message += f"\n... 他{len(consistency_issues) - 5}件の確認事項があります。\n"
+            else:
+                base_message += (
+                    "過去の記録と照合しましたが、特に矛盾は見つかりませんでした。"
+                    "追加で確認したいことや補足したい情報はありますか？"
+                )
+        
+        return base_message
 
     async def generate_topic_summary(
         self,

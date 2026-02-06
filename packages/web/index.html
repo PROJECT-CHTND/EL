@@ -111,6 +111,29 @@
         #knowledge-map-canvas {
             width: 100%;
             height: 200px;
+            position: relative;
+        }
+        #knowledge-map-canvas canvas,
+        #km-modal-canvas canvas {
+            display: block;
+            width: 100% !important;
+            height: 100% !important;
+        }
+        
+        /* Knowledge Map Modal */
+        #knowledge-map-modal {
+            opacity: 0;
+            transition: opacity 0.25s ease;
+        }
+        #knowledge-map-modal.visible {
+            opacity: 1;
+        }
+        #knowledge-map-modal #km-modal-content {
+            transform: scale(0.92);
+            transition: transform 0.25s ease;
+        }
+        #knowledge-map-modal.visible #km-modal-content {
+            transform: scale(1);
         }
         
         /* Topic chip */
@@ -161,17 +184,78 @@
             overflow: hidden;
         }
         
-        /* Responsive */
-        @media (max-width: 1280px) {
-            #app-grid { grid-template-columns: 240px 1fr 340px; }
+        /* Resize handles */
+        .resize-handle {
+            position: relative;
+            width: 4px;
+            cursor: col-resize;
+            background: transparent;
+            transition: background 0.15s;
+            z-index: 10;
+            flex-shrink: 0;
         }
+        .resize-handle::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: -2px;
+            right: -2px;
+        }
+        .resize-handle:hover,
+        .resize-handle.dragging {
+            background: rgba(229, 168, 75, 0.4);
+        }
+
+        /* Left pane toggle button */
+        .sidebar-toggle {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 20px;
+            height: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #1e2128;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 0 6px 6px 0;
+            cursor: pointer;
+            z-index: 20;
+            transition: background 0.15s, left 0.2s;
+            color: #94a3b8;
+            font-size: 10px;
+        }
+        .sidebar-toggle:hover {
+            background: #262a33;
+            color: #e2e8f0;
+        }
+
+        /* Left pane transition */
+        #left-pane {
+            transition: width 0.2s ease, min-width 0.2s ease;
+        }
+
+        /* Collapsed left pane */
+        #left-pane.collapsed {
+            width: 0 !important;
+            min-width: 0 !important;
+            overflow: hidden;
+            padding: 0;
+            border: none;
+        }
+        #left-pane.collapsed > * {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        /* Responsive */
         @media (max-width: 1024px) {
-            #app-grid { grid-template-columns: 1fr 340px; }
-            #left-pane { display: none; }
+            #left-pane:not(.collapsed) { width: 240px; min-width: 180px; }
         }
         @media (max-width: 768px) {
-            #app-grid { grid-template-columns: 1fr; }
             #right-pane { display: none; }
+            #resize-handle-right { display: none; }
         }
     </style>
 </head>
@@ -183,6 +267,12 @@
         <!-- Header - minimal -->
         <header class="flex-none h-12 px-4 flex items-center justify-between border-b border-white/5">
             <div class="flex items-center gap-3">
+                <button id="toggle-left-pane" class="p-1.5 rounded hover:bg-surface-2 transition-colors text-slate-400 hover:text-white" title="サイドバーの表示切替">
+                    <svg id="toggle-left-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="1" y="2" width="14" height="12" rx="2" />
+                        <line x1="5.5" y1="2" x2="5.5" y2="14" />
+                    </svg>
+                </button>
                 <h1 class="text-sm font-semibold text-white tracking-tight">
                     EL<span class="text-slate-500 font-normal ml-1.5">Eager Learner</span>
                 </h1>
@@ -193,17 +283,18 @@
         </header>
 
         <!-- Main 3-pane layout -->
-        <div id="app-grid" class="flex-1 grid grid-cols-[260px_1fr_380px] min-h-0">
+        <div id="app-grid" class="flex-1 flex min-h-0">
             
             <!-- ===== LEFT PANE: Sessions Archive ===== -->
-            <aside id="left-pane" class="border-r border-white/5 flex flex-col min-h-0">
+            <aside id="left-pane" class="border-r border-white/5 flex flex-col min-h-0" style="width: 260px; min-width: 180px; max-width: 480px; flex-shrink: 0;">
                 <div class="flex-none p-3 border-b border-white/5">
-                    <input 
-                        id="session-search"
-                        type="text"
-                        placeholder="検索..."
-                        class="w-full px-3 py-2 bg-surface-2 border border-white/5 rounded-lg text-sm placeholder-slate-500 text-white"
+                    <button 
+                        id="new-session-btn"
+                        class="w-full py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
                     >
+                        <span>+</span>
+                        <span>新しいセッション</span>
+                    </button>
                 </div>
                 <div class="flex-1 overflow-y-auto p-3">
                     <div class="text-xs text-slate-500 uppercase tracking-wider mb-2">Sessions</div>
@@ -213,8 +304,11 @@
                 </div>
             </aside>
 
+            <!-- Resize handle: left -->
+            <div id="resize-handle-left" class="resize-handle"></div>
+
             <!-- ===== CENTER PANE: Interview ===== -->
-            <main id="center-pane" class="flex flex-col min-h-0 bg-surface-1">
+            <main id="center-pane" class="flex-1 flex flex-col min-h-0 bg-surface-1">
                 
                 <!-- Start Screen -->
                 <div id="start-screen" class="flex-1 flex items-center justify-center p-6">
@@ -273,14 +367,17 @@
                 </div>
             </main>
 
+            <!-- Resize handle: right -->
+            <div id="resize-handle-right" class="resize-handle"></div>
+
             <!-- ===== RIGHT PANE: Knowledge Studio ===== -->
-            <aside id="right-pane" class="border-l border-white/5 flex flex-col min-h-0 bg-surface-0 overflow-y-auto">
+            <aside id="right-pane" class="border-l border-white/5 flex flex-col min-h-0 bg-surface-0 overflow-y-auto" style="width: 380px; min-width: 280px; max-width: 600px; flex-shrink: 0;">
                 
                 <!-- 1. Knowledge Map + Metrics -->
                 <div class="flex-none p-4 border-b border-white/5">
                     <div class="flex items-center justify-between mb-3">
                         <h3 class="text-xs font-medium text-slate-400 uppercase tracking-wider">Knowledge Map</h3>
-                        <button id="map-detail-btn" class="text-[10px] text-slate-500 hover:text-slate-300">詳細</button>
+                        <button id="map-detail-btn" class="text-[10px] text-slate-500 hover:text-slate-300 hover:bg-white/5 px-2 py-0.5 rounded transition-colors">詳細</button>
                     </div>
                     <div id="knowledge-map-canvas" class="bg-surface-1 rounded-lg overflow-hidden mb-3"></div>
                     <div class="grid grid-cols-3 gap-2 text-center">
@@ -348,6 +445,16 @@
                     </div>
                 </div>
 
+                <!-- 4.5 Pending Questions (collapsible) -->
+                <div id="questions-section" class="flex-none border-t border-white/5 hidden">
+                    <button id="questions-toggle" class="w-full px-4 py-2.5 flex items-center justify-between text-left hover:bg-surface-2 transition-colors">
+                        <span class="text-xs font-medium text-blue-400">Questions</span>
+                        <span id="questions-count-badge" class="text-xs bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded">0</span>
+                    </button>
+                    <div id="questions-list" class="px-4 pb-3 space-y-2 hidden">
+                    </div>
+                </div>
+
                 <!-- 5. Knowledge Summary (collapsible) - Tags integrated -->
                 <div id="knowledge-summary-section" class="flex-none border-t border-white/5">
                     <button id="summary-toggle" class="w-full px-4 py-2.5 flex items-center justify-between text-left hover:bg-surface-2 transition-colors">
@@ -398,17 +505,43 @@
                         </button>
                     </div>
                 </div>
+            </aside>
+        </div>
+    </div>
 
-                <!-- 7. Session End -->
-                <div class="flex-none p-3 border-t border-white/5">
-                    <button 
-                        id="end-session-btn"
-                        class="w-full py-2 text-xs text-slate-500 hover:text-slate-300 hover:bg-surface-2 rounded-lg transition-colors"
-                    >
-                        セッション終了
+    <!-- ===== Knowledge Map Fullscreen Modal ===== -->
+    <div id="knowledge-map-modal" class="fixed inset-0 z-50 hidden">
+        <!-- Backdrop -->
+        <div id="km-modal-backdrop" class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
+        <!-- Content -->
+        <div class="absolute inset-0 flex items-center justify-center p-8 pointer-events-none">
+            <div id="km-modal-content" class="relative bg-surface-1 rounded-2xl border border-white/10 shadow-2xl pointer-events-auto"
+                 style="width: 80vw; height: 75vh; max-width: 1200px; max-height: 900px;">
+                <!-- Header -->
+                <div class="absolute top-0 left-0 right-0 flex items-center justify-between px-5 py-3 z-10">
+                    <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Knowledge Map</h2>
+                    <button id="km-modal-close" class="text-slate-500 hover:text-white transition-colors p-1 rounded-lg hover:bg-white/10">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
                     </button>
                 </div>
-            </aside>
+                <!-- Map Canvas -->
+                <div id="km-modal-canvas" class="w-full h-full rounded-2xl overflow-hidden"></div>
+                <!-- Metrics Bar (bottom) -->
+                <div class="absolute bottom-0 left-0 right-0 flex items-center justify-center gap-6 px-5 py-3 z-10 bg-gradient-to-t from-black/40 to-transparent rounded-b-2xl">
+                    <div class="text-center">
+                        <span id="km-modal-coverage" class="text-lg font-semibold text-white">0%</span>
+                        <span class="text-[10px] text-slate-400 ml-1">Coverage</span>
+                    </div>
+                    <div class="text-center">
+                        <span id="km-modal-verified" class="text-lg font-semibold text-verified">0</span>
+                        <span class="text-[10px] text-slate-400 ml-1">Verified</span>
+                    </div>
+                    <div class="text-center">
+                        <span id="km-modal-conflicts" class="text-lg font-semibold text-conflict">0</span>
+                        <span class="text-[10px] text-slate-400 ml-1">Conflicts</span>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -475,20 +608,43 @@
         }
 
         // =====================================================
-        // Knowledge Map - Organic Particle Sphere
+        // Knowledge Map - Organic Particle Sphere with Tag Data
         // =====================================================
         class KnowledgeMap {
             constructor(container) {
                 this.container = container;
-                this.particleCount = 6000;
+                this.particleCount = 4000;
                 this.radius = 80;
                 this.noise = new SimplexNoise();
                 this.time = 0;
                 this.flashTimer = 0;
                 this.flashColor = null;
                 
+                // Tag data
+                this.tagNodes = [];
+                this.tagNodeMap = {}; // Map of tag id -> tag node
+                this.hoveredTag = null;
+                this.tooltip = null;
+                this.connectionLines = null; // Lines showing tag connections
+                
+                // Zoom settings
+                this.zoomMin = this.radius * 1.5;  // Close zoom
+                this.zoomMax = this.radius * 4;    // Far zoom
+                this.zoomSpeed = 0.1;
+                this.targetZoom = this.radius * 2.8;
+                
+                // Touch pinch
+                this.lastPinchDist = 0;
+                
+                // Drag rotation
+                this.isDragging = false;
+                this.dragStart = { x: 0, y: 0 };
+                this.targetRotationX = 0;
+                this.targetRotationY = 0;
+                this.autoRotate = true; // Auto-rotate when not dragging
+                
                 this.init();
-                this.animate();
+                this.loadTagData();
             }
             
             init() {
@@ -505,11 +661,288 @@
                 this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
                 this.renderer.setClearColor(0x000000, 0);
                 this.renderer.setSize(rect.width, rect.height);
+                this.renderer.domElement.style.cursor = 'grab';
                 this.container.appendChild(this.renderer.domElement);
                 
-                this.createParticles();
+                // Raycaster for hover detection
+                this.raycaster = new THREE.Raycaster();
+                this.raycaster.params.Points.threshold = 3;
+                this.mouse = new THREE.Vector2();
                 
+                this.createParticles();
+                this.createTooltip();
+                
+                // Event listeners
+                this.renderer.domElement.addEventListener('mousemove', (e) => this.onMouseMove(e));
+                this.renderer.domElement.addEventListener('mouseleave', () => this.onMouseLeave());
                 window.addEventListener('resize', () => this.handleResize());
+                
+                // Watch container size changes (e.g. sidebar resize)
+                if (typeof ResizeObserver !== 'undefined') {
+                    this._resizeObserver = new ResizeObserver(() => this.handleResize());
+                    this._resizeObserver.observe(this.container);
+                }
+                
+                // Drag rotation: mouse
+                this.renderer.domElement.addEventListener('mousedown', (e) => this.onMouseDown(e));
+                this.renderer.domElement.addEventListener('mouseup', () => this.onMouseUp());
+                
+                // Zoom: mouse wheel
+                this.renderer.domElement.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
+                
+                // Touch: drag rotation (1 finger) + pinch zoom (2 fingers)
+                this.renderer.domElement.addEventListener('touchstart', (e) => this.onTouchStart(e), { passive: false });
+                this.renderer.domElement.addEventListener('touchmove', (e) => this.onTouchMove(e), { passive: false });
+                this.renderer.domElement.addEventListener('touchend', () => this.onTouchEnd());
+                
+                this.animate();
+            }
+            
+            onWheel(e) {
+                e.preventDefault();
+                const delta = e.deltaY > 0 ? 1 : -1;
+                this.targetZoom = Math.max(this.zoomMin, Math.min(this.zoomMax, 
+                    this.targetZoom + delta * this.radius * this.zoomSpeed));
+            }
+            
+            onMouseDown(e) {
+                this.isDragging = true;
+                this.autoRotate = false;
+                this.dragStart.x = e.clientX;
+                this.dragStart.y = e.clientY;
+                this.renderer.domElement.style.cursor = 'grabbing';
+            }
+            
+            onMouseUp() {
+                this.isDragging = false;
+                this.renderer.domElement.style.cursor = 'grab';
+                // Resume auto-rotate after 3 seconds of no interaction
+                setTimeout(() => {
+                    if (!this.isDragging) {
+                        this.autoRotate = true;
+                    }
+                }, 3000);
+            }
+            
+            onTouchStart(e) {
+                if (e.touches.length === 1) {
+                    // Single finger: drag rotation
+                    this.isDragging = true;
+                    this.autoRotate = false;
+                    this.dragStart.x = e.touches[0].clientX;
+                    this.dragStart.y = e.touches[0].clientY;
+                } else if (e.touches.length === 2) {
+                    // Two fingers: pinch zoom
+                    e.preventDefault();
+                    this.isDragging = false;
+                    const dx = e.touches[0].clientX - e.touches[1].clientX;
+                    const dy = e.touches[0].clientY - e.touches[1].clientY;
+                    this.lastPinchDist = Math.sqrt(dx * dx + dy * dy);
+                }
+            }
+            
+            onTouchMove(e) {
+                if (e.touches.length === 1 && this.isDragging) {
+                    // Single finger: drag rotation
+                    const deltaX = e.touches[0].clientX - this.dragStart.x;
+                    const deltaY = e.touches[0].clientY - this.dragStart.y;
+                    
+                    this.targetRotationY += deltaX * 0.005;
+                    this.targetRotationX += deltaY * 0.005;
+                    
+                    // Limit vertical rotation
+                    this.targetRotationX = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.targetRotationX));
+                    
+                    this.dragStart.x = e.touches[0].clientX;
+                    this.dragStart.y = e.touches[0].clientY;
+                    
+                    this.hideTooltip();
+                    this.hideConnectionLines();
+                } else if (e.touches.length === 2 && this.lastPinchDist > 0) {
+                    // Two fingers: pinch zoom
+                    e.preventDefault();
+                    const dx = e.touches[0].clientX - e.touches[1].clientX;
+                    const dy = e.touches[0].clientY - e.touches[1].clientY;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    
+                    const delta = (this.lastPinchDist - dist) * 0.5;
+                    this.targetZoom = Math.max(this.zoomMin, Math.min(this.zoomMax, 
+                        this.targetZoom + delta));
+                    
+                    this.lastPinchDist = dist;
+                }
+            }
+            
+            onTouchEnd() {
+                this.isDragging = false;
+                this.lastPinchDist = 0;
+                // Resume auto-rotate after 3 seconds
+                setTimeout(() => {
+                    if (!this.isDragging) {
+                        this.autoRotate = true;
+                    }
+                }, 3000);
+            }
+            
+            async loadTagData() {
+                try {
+                    const response = await fetch('/api/knowledge-graph?limit=50');
+                    if (!response.ok) return;
+                    
+                    const data = await response.json();
+                    if (data.nodes.length === 0) return;
+                    
+                    // Build adjacency map and calculate connection counts
+                    const connectionCount = {};
+                    const adjacency = {};
+                    data.nodes.forEach(n => {
+                        connectionCount[n.id] = 0;
+                        adjacency[n.id] = [];
+                    });
+                    
+                    data.edges.forEach(e => {
+                        connectionCount[e.source] = (connectionCount[e.source] || 0) + e.co_occurrence_count;
+                        connectionCount[e.target] = (connectionCount[e.target] || 0) + e.co_occurrence_count;
+                        adjacency[e.source] = adjacency[e.source] || [];
+                        adjacency[e.target] = adjacency[e.target] || [];
+                        adjacency[e.source].push({ id: e.target, weight: e.co_occurrence_count });
+                        adjacency[e.target].push({ id: e.source, weight: e.co_occurrence_count });
+                    });
+                    
+                    // Calculate centrality score (usage + connections)
+                    const maxUsage = Math.max(...data.nodes.map(n => n.usage_count), 1);
+                    const maxConnections = Math.max(...Object.values(connectionCount), 1);
+                    
+                    // Initialize positions using force-directed layout on sphere
+                    const nodes = data.nodes.map((n, i) => {
+                        const usageScore = n.usage_count / maxUsage;
+                        const connScore = (connectionCount[n.id] || 0) / maxConnections;
+                        // Centrality combines usage and connections (parent-like = high both)
+                        const centrality = usageScore * 0.4 + connScore * 0.6;
+                        
+                        // Initial position using golden angle
+                        const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+                        const theta = goldenAngle * i;
+                        const phi = Math.acos(1 - 2 * (i + 0.5) / data.nodes.length);
+                        
+                        return {
+                            ...n,
+                            centrality,
+                            usageScore,
+                            connScore,
+                            connections: adjacency[n.id] || [],
+                            // Spherical coordinates
+                            theta,
+                            phi,
+                            // 3D position (will be updated by force simulation)
+                            x: Math.sin(phi) * Math.cos(theta),
+                            y: Math.cos(phi),
+                            z: Math.sin(phi) * Math.sin(theta),
+                        };
+                    });
+                    
+                    // Force-directed simulation on sphere surface
+                    this.runForceSimulation(nodes, data.edges);
+                    
+                    // Convert to final positions
+                    this.tagNodes = nodes.map(n => {
+                        const rFactor = 0.85 + n.centrality * 0.15;
+                        const r = this.radius * rFactor;
+                        return {
+                            ...n,
+                            r,
+                            baseX: n.x * r,
+                            baseY: n.y * r,
+                            baseZ: n.z * r,
+                        };
+                    });
+                    
+                    // Build map for quick lookup
+                    this.tagNodeMap = {};
+                    this.tagNodes.forEach(t => this.tagNodeMap[t.id] = t);
+                    
+                    this.createTagParticles();
+                } catch (error) {
+                    console.error('Failed to load tag data:', error);
+                }
+            }
+            
+            runForceSimulation(nodes, edges) {
+                // Simple force-directed layout on unit sphere
+                const iterations = 100;
+                const attractionStrength = 0.02;
+                const repulsionStrength = 0.005;
+                
+                // Build edge map with weights
+                const edgeMap = {};
+                edges.forEach(e => {
+                    const key1 = `${e.source}-${e.target}`;
+                    const key2 = `${e.target}-${e.source}`;
+                    edgeMap[key1] = e.co_occurrence_count;
+                    edgeMap[key2] = e.co_occurrence_count;
+                });
+                
+                const nodeMap = {};
+                nodes.forEach(n => nodeMap[n.id] = n);
+                
+                for (let iter = 0; iter < iterations; iter++) {
+                    const temperature = 1 - iter / iterations; // Cooling
+                    
+                    // Calculate forces for each node
+                    nodes.forEach(node => {
+                        let fx = 0, fy = 0, fz = 0;
+                        
+                        // Repulsion from all other nodes
+                        nodes.forEach(other => {
+                            if (node.id === other.id) return;
+                            
+                            const dx = node.x - other.x;
+                            const dy = node.y - other.y;
+                            const dz = node.z - other.z;
+                            const dist = Math.sqrt(dx*dx + dy*dy + dz*dz) || 0.01;
+                            
+                            // Repulsion force (inverse square)
+                            const repForce = repulsionStrength / (dist * dist);
+                            fx += (dx / dist) * repForce;
+                            fy += (dy / dist) * repForce;
+                            fz += (dz / dist) * repForce;
+                        });
+                        
+                        // Attraction to connected nodes
+                        node.connections.forEach(conn => {
+                            const other = nodeMap[conn.id];
+                            if (!other) return;
+                            
+                            const dx = other.x - node.x;
+                            const dy = other.y - node.y;
+                            const dz = other.z - node.z;
+                            const dist = Math.sqrt(dx*dx + dy*dy + dz*dz) || 0.01;
+                            
+                            // Attraction proportional to co-occurrence
+                            const attForce = attractionStrength * Math.log(1 + conn.weight);
+                            fx += (dx / dist) * attForce;
+                            fy += (dy / dist) * attForce;
+                            fz += (dz / dist) * attForce;
+                        });
+                        
+                        node.fx = fx * temperature;
+                        node.fy = fy * temperature;
+                        node.fz = fz * temperature;
+                    });
+                    
+                    // Apply forces and project back to sphere
+                    nodes.forEach(node => {
+                        node.x += node.fx;
+                        node.y += node.fy;
+                        node.z += node.fz;
+                        
+                        // Normalize to sphere surface
+                        const len = Math.sqrt(node.x*node.x + node.y*node.y + node.z*node.z) || 1;
+                        node.x /= len;
+                        node.y /= len;
+                        node.z /= len;
+                    });
+                }
             }
             
             createParticles() {
@@ -524,7 +957,6 @@
                     const theta = Math.random() * Math.PI * 2;
                     const phi = Math.acos(2 * Math.random() - 1);
                     
-                    // Mix of surface and volume particles
                     let rNorm;
                     if (Math.random() < 0.7) {
                         rNorm = 0.8 + Math.random() * 0.2;
@@ -549,7 +981,6 @@
                     
                     depths[i] = depth;
                     
-                    // Cyan-blue gradient
                     const colorVariation = Math.random() * 0.2;
                     const depthFade = 0.5 + depth * 0.5;
                     colors[i * 3] = (0.2 + colorVariation * 0.3) * depthFade;
@@ -578,35 +1009,271 @@
                 this.scene.add(this.particles);
             }
             
+            createTagParticles() {
+                if (this.tagPoints) {
+                    this.scene.remove(this.tagPoints);
+                }
+                
+                if (this.tagNodes.length === 0) return;
+                
+                const geometry = new THREE.BufferGeometry();
+                const positions = new Float32Array(this.tagNodes.length * 3);
+                const colors = new Float32Array(this.tagNodes.length * 3);
+                
+                this.tagNodes.forEach((tag, i) => {
+                    positions[i * 3] = tag.baseX;
+                    positions[i * 3 + 1] = tag.baseY;
+                    positions[i * 3 + 2] = tag.baseZ;
+                    
+                    // Red-Blue gradient based on centrality
+                    // High centrality (parent tags) = Red
+                    // Low centrality (leaf tags) = Blue
+                    const t = tag.centrality; // 0 = leaf (blue), 1 = parent (red)
+                    
+                    // Gradient: Blue (0,0,1) -> Purple (0.5,0,0.5) -> Red (1,0,0)
+                    // Using smooth interpolation for vibrant colors
+                    const r = t;                           // Red increases with centrality
+                    const g = 0;                           // No green for pure red-blue gradient
+                    const b = 1 - t;                       // Blue decreases with centrality
+                    
+                    // Add brightness boost for visibility
+                    const brightness = 0.7 + t * 0.3;
+                    colors[i * 3] = r * brightness;
+                    colors[i * 3 + 1] = g * brightness;
+                    colors[i * 3 + 2] = b * brightness;
+                });
+                
+                geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+                
+                const material = new THREE.PointsMaterial({
+                    size: 3,
+                    vertexColors: true,
+                    transparent: true,
+                    opacity: 0.95,
+                    blending: THREE.AdditiveBlending,
+                    sizeAttenuation: true
+                });
+                
+                this.tagPoints = new THREE.Points(geometry, material);
+                this.scene.add(this.tagPoints);
+            }
+            
+            createTooltip() {
+                this.tooltip = document.createElement('div');
+                this.tooltip.style.cssText = `
+                    position: fixed;
+                    visibility: hidden;
+                    background: rgba(22, 24, 29, 0.95);
+                    border: 1px solid rgba(76, 201, 240, 0.3);
+                    border-radius: 8px;
+                    padding: 10px 14px;
+                    font-size: 12px;
+                    color: #e2e8f0;
+                    pointer-events: none;
+                    z-index: 10000;
+                    backdrop-filter: blur(8px);
+                    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+                `;
+                document.body.appendChild(this.tooltip);
+            }
+            
+            onMouseMove(event) {
+                const rect = this.renderer.domElement.getBoundingClientRect();
+                
+                // Handle drag rotation
+                if (this.isDragging) {
+                    const deltaX = event.clientX - this.dragStart.x;
+                    const deltaY = event.clientY - this.dragStart.y;
+                    
+                    this.targetRotationY += deltaX * 0.005;
+                    this.targetRotationX += deltaY * 0.005;
+                    
+                    // Limit vertical rotation
+                    this.targetRotationX = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.targetRotationX));
+                    
+                    this.dragStart.x = event.clientX;
+                    this.dragStart.y = event.clientY;
+                    
+                    // Hide tooltip while dragging
+                    this.hideTooltip();
+                    this.hideConnectionLines();
+                    return;
+                }
+                
+                this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+                this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+                
+                if (this.tagPoints && this.tagNodes.length > 0) {
+                    this.raycaster.setFromCamera(this.mouse, this.camera);
+                    const intersects = this.raycaster.intersectObject(this.tagPoints);
+                    
+                    if (intersects.length > 0) {
+                        const idx = intersects[0].index;
+                        const tag = this.tagNodes[idx];
+                        
+                        if (tag !== this.hoveredTag) {
+                            this.hoveredTag = tag;
+                            this.showTooltip(event, tag);
+                            this.showConnectionLines(tag);
+                        } else {
+                            this.moveTooltip(event);
+                        }
+                    } else {
+                        this.hideTooltip();
+                        this.hideConnectionLines();
+                    }
+                }
+            }
+            
+            onMouseLeave() {
+                this.hideTooltip();
+                this.hideConnectionLines();
+            }
+            
+            showConnectionLines(tag) {
+                this.hideConnectionLines(); // Remove existing lines
+                
+                if (!tag.connections || tag.connections.length === 0) return;
+                
+                const positions = [];
+                const colors = [];
+                
+                // Get tag color for the source
+                const sourceT = tag.centrality;
+                const sourceR = sourceT;
+                const sourceB = 1 - sourceT;
+                
+                tag.connections.forEach(conn => {
+                    const targetTag = this.tagNodeMap[conn.id];
+                    if (!targetTag) return;
+                    
+                    // Target color
+                    const targetT = targetTag.centrality;
+                    const targetR = targetT;
+                    const targetB = 1 - targetT;
+                    
+                    // Line from source to target (base positions, rotation applied to object)
+                    positions.push(tag.baseX, tag.baseY, tag.baseZ);
+                    positions.push(targetTag.baseX, targetTag.baseY, targetTag.baseZ);
+                    
+                    // Gradient color along the line (source color -> target color)
+                    colors.push(sourceR, 0, sourceB);
+                    colors.push(targetR, 0, targetB);
+                });
+                
+                if (positions.length === 0) return;
+                
+                const geometry = new THREE.BufferGeometry();
+                geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+                geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+                
+                const material = new THREE.LineBasicMaterial({
+                    vertexColors: true,
+                    transparent: true,
+                    opacity: 0.6,
+                    blending: THREE.AdditiveBlending,
+                    linewidth: 1,
+                });
+                
+                this.connectionLines = new THREE.LineSegments(geometry, material);
+                // Sync rotation with particles
+                if (this.particles) {
+                    this.connectionLines.rotation.copy(this.particles.rotation);
+                }
+                this.scene.add(this.connectionLines);
+            }
+            
+            hideConnectionLines() {
+                if (this.connectionLines) {
+                    this.scene.remove(this.connectionLines);
+                    this.connectionLines.geometry.dispose();
+                    this.connectionLines.material.dispose();
+                    this.connectionLines = null;
+                }
+            }
+            
+            showTooltip(event, tag) {
+                // Generate color matching the tag's gradient position
+                const t = tag.centrality;
+                const r = Math.round(t * 255);
+                const b = Math.round((1 - t) * 255);
+                const tagColor = `rgb(${r}, 0, ${b})`;
+                
+                // Centrality label
+                let centralityLabel = '';
+                if (t > 0.7) centralityLabel = '中核タグ';
+                else if (t > 0.4) centralityLabel = '中間タグ';
+                else centralityLabel = '末端タグ';
+                
+                const content = `
+                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+                        <div style="width: 10px; height: 10px; border-radius: 50%; background: ${tagColor}; box-shadow: 0 0 6px ${tagColor};"></div>
+                        <span style="font-weight: 600; font-size: 13px; color: #fff;">${tag.name}</span>
+                    </div>
+                    <div style="color: #94a3b8; font-size: 11px; margin-bottom: 4px;">
+                        ${tag.insight_count > 0 ? `インサイト: ${tag.insight_count}` : ''}
+                        ${tag.insight_count > 0 && tag.document_count > 0 ? ' / ' : ''}
+                        ${tag.document_count > 0 ? `ドキュメント: ${tag.document_count}` : ''}
+                    </div>
+                    <div style="color: ${tagColor}; font-size: 10px; font-weight: 500;">${centralityLabel}</div>
+                `;
+                this.tooltip.innerHTML = content;
+                this.tooltip.style.visibility = 'visible';
+                this.moveTooltip(event);
+            }
+            
+            moveTooltip(event) {
+                this.tooltip.style.left = `${event.clientX + 12}px`;
+                this.tooltip.style.top = `${event.clientY - 10}px`;
+            }
+            
+            hideTooltip() {
+                this.hoveredTag = null;
+                this.tooltip.style.visibility = 'hidden';
+            }
+            
             handleResize() {
                 const rect = this.container.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) return;
                 this.camera.aspect = rect.width / rect.height;
                 this.camera.updateProjectionMatrix();
                 this.renderer.setSize(rect.width, rect.height);
             }
             
-            // Event: Fact verified - flash green/gold
+            // Public alias for external callers
+            resize() {
+                this.handleResize();
+            }
+            
             onFactVerified(count = 1) {
                 this.flashTimer = 2.0;
-                this.flashColor = [0.29, 0.87, 0.5]; // Green
+                this.flashColor = [0.29, 0.87, 0.5];
+                setTimeout(() => this.loadTagData(), 1500);
             }
             
-            // Event: Conflict detected - flash red
             onConflict() {
                 this.flashTimer = 2.5;
-                this.flashColor = [0.97, 0.27, 0.27]; // Red
+                this.flashColor = [0.97, 0.27, 0.27];
             }
             
-            // Event: Relation added
             onRelationAdded() {
                 this.flashTimer = 1.5;
-                this.flashColor = [0.4, 0.8, 1.0]; // Bright cyan
+                this.flashColor = [0.4, 0.8, 1.0];
+                this.loadTagData();
             }
             
             lerp(a, b, t) { return a + (b - a) * t; }
             
             animate() {
                 requestAnimationFrame(() => this.animate());
+                
+                // Smooth zoom interpolation
+                this.camera.position.z = this.lerp(this.camera.position.z, this.targetZoom, 0.08);
+                
+                // Adjust raycaster threshold based on zoom (easier to hover when zoomed in)
+                const zoomFactor = this.camera.position.z / (this.radius * 2.8);
+                this.raycaster.params.Points.threshold = 2 + zoomFactor * 2;
                 
                 this.time += 0.006;
                 const geometry = this.particles.geometry;
@@ -616,19 +1283,32 @@
                 const phases = geometry.attributes.phase.array;
                 const depths = geometry.attributes.depth.array;
                 
-                // Slow rotation
-                this.particles.rotation.y += 0.0004;
-                this.particles.rotation.x = Math.sin(this.time * 0.3) * 0.02;
+                // Auto-rotate when not dragging
+                if (this.autoRotate) {
+                    this.targetRotationY += 0.0004;
+                }
                 
-                // Flash decay
+                // Smooth rotation interpolation
+                this.particles.rotation.y = this.lerp(this.particles.rotation.y, this.targetRotationY, 0.1);
+                this.particles.rotation.x = this.lerp(this.particles.rotation.x, this.targetRotationX, 0.1);
+                
+                if (this.tagPoints) {
+                    this.tagPoints.rotation.y = this.particles.rotation.y;
+                    this.tagPoints.rotation.x = this.particles.rotation.x;
+                }
+                
+                // Sync connection lines rotation
+                if (this.connectionLines) {
+                    this.connectionLines.rotation.y = this.particles.rotation.y;
+                    this.connectionLines.rotation.x = this.particles.rotation.x;
+                }
+                
                 if (this.flashTimer > 0) {
                     this.flashTimer -= 0.016;
                 }
                 
-                // Wave parameters (subtle)
                 const waveSpeed = 0.1;
                 const waveAmount = 4;
-                const noiseScale = 0.008;
                 const noiseAmount = 6;
                 
                 for (let i = 0; i < this.particleCount; i++) {
@@ -647,7 +1327,6 @@
                     
                     const depthFactor = 0.3 + depth * 0.7;
                     
-                    // Organic wave displacement
                     const wave1 = Math.sin(this.time * waveSpeed + phase + ny * 4) * waveAmount * 0.5 * depthFactor;
                     const wave2 = Math.sin(this.time * waveSpeed * 0.7 + phase * 1.3 + nx * 3) * waveAmount * 0.3 * depthFactor;
                     
@@ -664,24 +1343,20 @@
                     positions[i3 + 1] = by * scale;
                     positions[i3 + 2] = bz * scale;
                     
-                    // Base color: cyan-blue
                     let r = 0.2 + (i % 3) * 0.05;
                     let g = 0.5 + depth * 0.2;
                     let b = 0.85;
                     
-                    // Depth brightness
                     const depthBrightness = 0.5 + depth * 0.5;
                     r *= depthBrightness;
                     g *= depthBrightness;
                     b *= depthBrightness;
                     
-                    // Shimmer
                     const shimmer = (displacement / (waveAmount + noiseAmount + 0.1)) * 0.2;
                     r += shimmer * 0.3;
                     g += shimmer * 0.5;
                     b += shimmer * 0.7;
                     
-                    // Flash effect
                     if (this.flashTimer > 0 && this.flashColor) {
                         const flashT = Math.pow(this.flashTimer / 2.5, 2) * 0.5;
                         r = this.lerp(r, this.flashColor[0], flashT);
@@ -703,7 +1378,15 @@
             dispose() {
                 this.particles.geometry.dispose();
                 this.particles.material.dispose();
+                if (this.tagPoints) {
+                    this.tagPoints.geometry.dispose();
+                    this.tagPoints.material.dispose();
+                }
+                this.hideConnectionLines(); // Clean up connection lines
                 this.renderer.dispose();
+                if (this.tooltip) {
+                    this.tooltip.remove();
+                }
             }
         }
 
@@ -718,6 +1401,7 @@
         let topics = [];
         let facts = [];
         let conflicts = [];
+        let pendingQuestions = [];
         let knowledgeMap = null;
 
         // DOM
@@ -733,12 +1417,16 @@
         const factCountEl = document.getElementById('fact-count');
         const sessionListEl = document.getElementById('session-list');
         const sendBtn = document.getElementById('send-btn');
-        const endSessionBtn = document.getElementById('end-session-btn');
+        const newSessionBtn = document.getElementById('new-session-btn');
         const headerStatus = document.getElementById('header-status');
         const conflictsSection = document.getElementById('conflicts-section');
         const conflictsToggle = document.getElementById('conflicts-toggle');
         const conflictsList = document.getElementById('conflicts-list');
         const conflictsCountBadge = document.getElementById('conflicts-count-badge');
+        const questionsSection = document.getElementById('questions-section');
+        const questionsToggle = document.getElementById('questions-toggle');
+        const questionsList = document.getElementById('questions-list');
+        const questionsCountBadge = document.getElementById('questions-count-badge');
         
         // Metrics
         const metricCoverage = document.getElementById('metric-coverage');
@@ -751,11 +1439,160 @@
         let isStarting = false;
         let isSending = false;
 
+        // ==================== Sidebar Resize & Toggle ====================
+        const leftPane = document.getElementById('left-pane');
+        const rightPane = document.getElementById('right-pane');
+        const resizeHandleLeft = document.getElementById('resize-handle-left');
+        const resizeHandleRight = document.getElementById('resize-handle-right');
+        const toggleLeftBtn = document.getElementById('toggle-left-pane');
+        let leftPaneCollapsed = false;
+
+        // Restore sidebar widths from localStorage
+        const savedLeftWidth = localStorage.getItem('el-left-pane-width');
+        const savedRightWidth = localStorage.getItem('el-right-pane-width');
+        const savedLeftCollapsed = localStorage.getItem('el-left-pane-collapsed');
+        if (savedLeftWidth && !savedLeftCollapsed) leftPane.style.width = savedLeftWidth + 'px';
+        if (savedRightWidth) rightPane.style.width = savedRightWidth + 'px';
+        if (savedLeftCollapsed === 'true') {
+            leftPaneCollapsed = true;
+            leftPane.classList.add('collapsed');
+            resizeHandleLeft.style.display = 'none';
+        }
+
+        // Generic resize handler factory
+        function createResizeHandler(pane, handle, side) {
+            let startX, startWidth;
+
+            function onMouseDown(e) {
+                e.preventDefault();
+                startX = e.clientX;
+                startWidth = pane.getBoundingClientRect().width;
+                handle.classList.add('dragging');
+                pane.style.transition = 'none'; // Disable transition during drag
+                document.body.style.cursor = 'col-resize';
+                document.body.style.userSelect = 'none';
+                document.addEventListener('mousemove', onMouseMove);
+                document.addEventListener('mouseup', onMouseUp);
+            }
+
+            function onMouseMove(e) {
+                const delta = side === 'left' ? (e.clientX - startX) : (startX - e.clientX);
+                const newWidth = Math.max(
+                    parseInt(pane.style.minWidth) || 180,
+                    Math.min(parseInt(pane.style.maxWidth) || 600, startWidth + delta)
+                );
+                pane.style.width = newWidth + 'px';
+                // Keep knowledge map centered during drag
+                if (knowledgeMap) knowledgeMap.handleResize();
+            }
+
+            function onMouseUp() {
+                handle.classList.remove('dragging');
+                pane.style.transition = ''; // Re-enable transition
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+                document.removeEventListener('mousemove', onMouseMove);
+                document.removeEventListener('mouseup', onMouseUp);
+                // Persist width
+                const key = side === 'left' ? 'el-left-pane-width' : 'el-right-pane-width';
+                localStorage.setItem(key, Math.round(pane.getBoundingClientRect().width));
+                // Resize knowledge map if right pane changed
+                if (side === 'right' && knowledgeMap) {
+                    knowledgeMap.resize?.();
+                }
+            }
+
+            handle.addEventListener('mousedown', onMouseDown);
+        }
+
+        createResizeHandler(leftPane, resizeHandleLeft, 'left');
+        createResizeHandler(rightPane, resizeHandleRight, 'right');
+
+        // Left pane toggle
+        toggleLeftBtn.addEventListener('click', () => {
+            leftPaneCollapsed = !leftPaneCollapsed;
+            if (leftPaneCollapsed) {
+                leftPane.classList.add('collapsed');
+                resizeHandleLeft.style.display = 'none';
+                localStorage.setItem('el-left-pane-collapsed', 'true');
+            } else {
+                leftPane.classList.remove('collapsed');
+                leftPane.style.width = (savedLeftWidth || 260) + 'px';
+                resizeHandleLeft.style.display = '';
+                localStorage.removeItem('el-left-pane-collapsed');
+            }
+        });
+
         // Initialize Knowledge Map
+        let knowledgeMapModal = null; // Separate KnowledgeMap instance for modal
         requestAnimationFrame(() => {
             const mapContainer = document.getElementById('knowledge-map-canvas');
             if (mapContainer) {
                 knowledgeMap = new KnowledgeMap(mapContainer);
+            }
+        });
+
+        // Knowledge Map Modal
+        const kmModal = document.getElementById('knowledge-map-modal');
+        const kmModalBackdrop = document.getElementById('km-modal-backdrop');
+        const kmModalClose = document.getElementById('km-modal-close');
+        const kmModalCanvas = document.getElementById('km-modal-canvas');
+
+        function openKnowledgeMapModal() {
+            // Sync metrics
+            document.getElementById('km-modal-coverage').textContent = document.getElementById('metric-coverage').textContent;
+            document.getElementById('km-modal-verified').textContent = document.getElementById('metric-verified').textContent;
+            document.getElementById('km-modal-conflicts').textContent = document.getElementById('metric-conflicts').textContent;
+
+            // Show modal
+            kmModal.classList.remove('hidden');
+            // Force reflow then add visible class for animation
+            kmModal.offsetHeight;
+            kmModal.classList.add('visible');
+
+            // Create a dedicated KnowledgeMap for the modal (larger, higher quality)
+            requestAnimationFrame(() => {
+                if (knowledgeMapModal) {
+                    knowledgeMapModal.dispose();
+                    kmModalCanvas.innerHTML = '';
+                }
+                knowledgeMapModal = new KnowledgeMap(kmModalCanvas);
+                // Copy rotation state from sidebar map
+                if (knowledgeMap) {
+                    knowledgeMapModal.targetRotationX = knowledgeMap.targetRotationX;
+                    knowledgeMapModal.targetRotationY = knowledgeMap.targetRotationY;
+                    knowledgeMapModal.targetZoom = knowledgeMap.radius * 2.5;
+                    knowledgeMapModal.particles.rotation.x = knowledgeMap.particles.rotation.x;
+                    knowledgeMapModal.particles.rotation.y = knowledgeMap.particles.rotation.y;
+                }
+            });
+
+            // Prevent body scroll
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeKnowledgeMapModal() {
+            kmModal.classList.remove('visible');
+            // Wait for animation to finish, then hide
+            setTimeout(() => {
+                kmModal.classList.add('hidden');
+                // Dispose modal map instance
+                if (knowledgeMapModal) {
+                    knowledgeMapModal.dispose();
+                    knowledgeMapModal = null;
+                    kmModalCanvas.innerHTML = '';
+                }
+                document.body.style.overflow = '';
+            }, 250);
+        }
+
+        document.getElementById('map-detail-btn').addEventListener('click', openKnowledgeMapModal);
+        kmModalClose.addEventListener('click', closeKnowledgeMapModal);
+        kmModalBackdrop.addEventListener('click', closeKnowledgeMapModal);
+        // Close on Escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && !kmModal.classList.contains('hidden')) {
+                closeKnowledgeMapModal();
             }
         });
 
@@ -822,7 +1659,10 @@
         }
 
         function formatTimeAgo(iso) {
-            const d = new Date(iso);
+            if (!iso) return '';
+            // サーバーからの時刻はUTCなので、Zがない場合は追加
+            const isoUtc = iso.endsWith('Z') ? iso : iso + 'Z';
+            const d = new Date(isoUtc);
             const now = new Date();
             const diff = Math.floor((now - d) / 60000);
             if (diff < 1) return 'たった今';
@@ -921,11 +1761,31 @@
                     updateMetrics();
                 }
                 
+                // Load pending questions for this session
+                loadPendingQuestions(sessionId);
+                
             } catch (err) {
                 console.error('Error resuming session:', err);
                 showToast('セッションの再開に失敗しました', 'error');
             } finally {
                 isStarting = false;
+            }
+        }
+
+        async function loadPendingQuestions(sid) {
+            try {
+                const res = await fetch(`${API_BASE}/api/sessions/${sid}/questions?status=pending`);
+                if (!res.ok) return;
+                const data = await res.json();
+                
+                pendingQuestions = data.questions || [];
+                renderPendingQuestions();
+                
+                if (pendingQuestions.length > 0) {
+                    showToast(`未回答の質問が${pendingQuestions.length}件あります`, 'info');
+                }
+            } catch (e) {
+                console.error('Error loading pending questions:', e);
             }
         }
 
@@ -956,7 +1816,7 @@
                 const data = await res.json();
                 removeTyping(typingId);
                 
-                addMessage(data.response, 'assistant', data.knowledge_used > 0);
+                addMessage(data.response, 'assistant', data.knowledge_detail || []);
                 
                 // Handle insights
                 if (data.insights_saved > 0 && data.insights_detail) {
@@ -969,6 +1829,17 @@
                 if (data.consistency_issues?.length > 0) {
                     data.consistency_issues.forEach(c => addConflict(c));
                     if (knowledgeMap) knowledgeMap.onConflict();
+                }
+                
+                // Handle pending questions
+                if (data.pending_questions?.length > 0) {
+                    data.pending_questions.forEach(q => addPendingQuestion(q));
+                }
+                
+                // Handle answered questions - remove from pending
+                if (data.questions_answered?.length > 0) {
+                    data.questions_answered.forEach(qid => markQuestionAnswered(qid));
+                    showToast(`${data.questions_answered.length}件の質問に回答しました`, 'success');
                 }
                 
                 // Handle aggregation suggestion
@@ -997,26 +1868,28 @@
             }
         });
 
-        // End session
-        endSessionBtn.addEventListener('click', async () => {
-            if (!sessionId) return;
-            if (!confirm('セッションを終了しますか？')) return;
-            
-            updateStatus('要約生成中...');
-            
-            try {
-                const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/end`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
-                });
+        // New session button (replaces end session button)
+        newSessionBtn.addEventListener('click', async () => {
+            // If there's an active session, end it first
+            if (sessionId) {
+                if (!confirm('セッションを終了して新しいセッションを開始しますか？')) return;
                 
-                if (res.ok) {
-                    const data = await res.json();
-                    if (data.summary) showSummaryModal(data.summary);
+                updateStatus('要約生成中...');
+                
+                try {
+                    const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/end`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                    
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (data.summary) showSummaryModal(data.summary);
+                    }
+                    
+                } catch (err) {
+                    console.error('Error ending session:', err);
                 }
-                
-            } catch (err) {
-                console.error('Error ending session:', err);
             }
             
             resetSession();
@@ -1027,15 +1900,23 @@
             conflictsList.classList.toggle('hidden');
         });
 
+        questionsToggle?.addEventListener('click', () => {
+            questionsList.classList.toggle('hidden');
+        });
+
         // Helper functions
-        function addMessage(text, type, hasRef = false) {
+        function addMessage(text, type, knowledgeDetail = []) {
             const div = document.createElement('div');
             div.className = `fade-up flex ${type === 'user' ? 'justify-end' : 'justify-start'}`;
             
+            // Container for bubble + reference section
+            const container = document.createElement('div');
+            container.className = 'max-w-[75%]';
+            
             const bubble = document.createElement('div');
             bubble.className = type === 'user' 
-                ? 'max-w-[75%] px-4 py-2.5 rounded-2xl bg-accent text-surface-0 text-sm'
-                : 'max-w-[75%] px-4 py-2.5 rounded-2xl bg-surface-3 text-slate-200 text-sm prose-msg';
+                ? 'px-4 py-2.5 rounded-2xl bg-accent text-surface-0 text-sm'
+                : 'px-4 py-2.5 rounded-2xl bg-surface-3 text-slate-200 text-sm prose-msg';
             
             if (type === 'user') {
                 bubble.textContent = text;
@@ -1043,15 +1924,52 @@
                 bubble.innerHTML = marked.parse(text);
             }
             
-            div.appendChild(bubble);
+            container.appendChild(bubble);
             
-            if (type === 'assistant' && hasRef) {
-                const ref = document.createElement('div');
-                ref.className = 'text-[10px] text-slate-500 mt-1 ml-1';
-                ref.textContent = '📚 過去の記録を参照';
-                div.querySelector('div').after(ref);
+            // Add expandable referenced facts section for assistant messages with knowledge
+            if (type === 'assistant' && knowledgeDetail && knowledgeDetail.length > 0) {
+                const refId = 'ref-' + Date.now();
+                const refSection = document.createElement('div');
+                refSection.className = 'mt-2 ml-1';
+                refSection.innerHTML = `
+                    <button 
+                        class="text-[10px] text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors"
+                        onclick="document.getElementById('${refId}').classList.toggle('hidden'); this.querySelector('.ref-arrow').textContent = document.getElementById('${refId}').classList.contains('hidden') ? '▶' : '▼';"
+                    >
+                        <span class="ref-arrow">▶</span>
+                        <span>📚 参照した事実 (${knowledgeDetail.length}件)</span>
+                    </button>
+                    <div id="${refId}" class="hidden mt-2 space-y-1.5 pl-2 border-l-2 border-blue-400/30">
+                        ${knowledgeDetail.map(k => {
+                            const subject = escapeHtml(k.subject || '');
+                            const predicate = escapeHtml(k.predicate || '');
+                            const object = escapeHtml(k.object || '');
+                            const domain = k.domain || 'general';
+                            const date = k.created_at ? new Date(k.created_at).toLocaleDateString('ja-JP') : '';
+                            
+                            return `
+                                <div class="bg-surface-2/50 rounded-lg p-2 text-[10px]">
+                                    <div class="flex items-start gap-1.5">
+                                        <span class="text-blue-400 flex-none mt-0.5">•</span>
+                                        <div class="flex-1 min-w-0">
+                                            <div class="flex items-center gap-1 flex-wrap">
+                                                <span class="text-slate-400 font-medium">${subject}</span>
+                                                <span class="text-slate-500">→</span>
+                                                <span class="text-slate-300">${predicate}</span>
+                                            </div>
+                                            <div class="text-white mt-0.5">${object}</div>
+                                            ${date ? `<div class="text-slate-600 mt-1 text-[9px]">${date}</div>` : ''}
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                `;
+                container.appendChild(refSection);
             }
             
+            div.appendChild(container);
             chatMessages.appendChild(div);
             chatMessages.scrollTop = chatMessages.scrollHeight;
         }
@@ -1112,35 +2030,65 @@
         }
 
         function addConflict(conflict) {
+            // Only add if not already present (by id)
+            if (conflict.id && conflicts.some(c => c.id === conflict.id)) {
+                return;
+            }
             conflicts.push(conflict);
             renderConflicts();
         }
 
+        // Load conflicts from API
+        async function loadConflicts() {
+            try {
+                const res = await fetch(`${API_BASE}/api/conflicts?include_resolved=false`);
+                if (!res.ok) return;
+                const data = await res.json();
+                
+                // Replace current conflicts with persisted ones
+                conflicts = data.conflicts || [];
+                renderConflicts();
+                updateMetrics();
+            } catch (e) {
+                console.error('Error loading conflicts:', e);
+            }
+        }
+
         function renderConflicts() {
-            if (conflicts.length === 0) {
+            // Filter to show only unresolved conflicts
+            const unresolvedConflicts = conflicts.filter(c => 
+                !c.status || c.status === 'unresolved'
+            );
+            
+            if (unresolvedConflicts.length === 0) {
                 conflictsSection.classList.add('hidden');
+                conflictsCountBadge.textContent = '0';
+                metricConflicts.textContent = '0';
                 return;
             }
             
             conflictsSection.classList.remove('hidden');
-            conflictsCountBadge.textContent = conflicts.length;
+            conflictsCountBadge.textContent = unresolvedConflicts.length;
+            metricConflicts.textContent = unresolvedConflicts.length;
             
-            conflictsList.innerHTML = conflicts.map((c, i) => {
+            conflictsList.innerHTML = unresolvedConflicts.map((c) => {
                 // Handle both snake_case (API) and camelCase field names
+                const conflictId = c.id || '';
                 const prevText = c.previous_text || c.previousText || c.previous?.text || c.previous || '(不明)';
                 const currText = c.current_text || c.currentText || c.current?.text || c.current || '(不明)';
                 const title = c.title || c.subject || '情報の変更';
                 const kind = c.kind || 'change';
                 const kindLabel = kind === 'contradiction' ? '矛盾' : '変更';
                 const kindColor = kind === 'contradiction' ? 'text-conflict' : 'text-amber-400';
+                const suggestedQ = c.suggested_question || c.suggestedQuestion || '';
                 
                 return `
-                    <div class="bg-conflict/5 border border-conflict/20 rounded-lg p-3">
+                    <div class="bg-conflict/5 border border-conflict/20 rounded-lg p-3" data-conflict-id="${escapeHtml(conflictId)}">
                         <div class="flex items-center gap-2 mb-2">
                             <span class="text-[10px] ${kindColor} bg-white/5 px-1.5 py-0.5 rounded">${kindLabel}</span>
                             <span class="text-xs text-white flex-1">${escapeHtml(title)}</span>
                         </div>
-                        <div class="space-y-1 mb-3">
+                        <div class="space-y-1 mb-2">
                             <div class="text-[10px]">
                                 <span class="text-slate-500">以前:</span>
                                 <span class="text-slate-300 ml-1">${escapeHtml(prevText)}</span>
@@ -1150,20 +2098,180 @@
                                 <span class="text-white ml-1">${escapeHtml(currText)}</span>
                             </div>
                         </div>
+                        ${suggestedQ ? `
+                        <div class="text-[10px] text-blue-400/80 mb-3 italic">
+                            💡 ${escapeHtml(suggestedQ)}
+                        </div>
+                        ` : ''}
                         <div class="flex gap-1">
-                            <button class="px-2 py-1 bg-verified/20 text-verified text-[10px] rounded hover:bg-verified/30" onclick="resolveConflict(${i}, 'accept')">今回を採用</button>
-                            <button class="px-2 py-1 bg-surface-3 text-slate-300 text-[10px] rounded hover:bg-surface-4" onclick="resolveConflict(${i}, 'keep')">以前を維持</button>
+                            <button class="px-2 py-1 bg-verified/20 text-verified text-[10px] rounded hover:bg-verified/30" 
+                                onclick="resolveConflict('${escapeHtml(conflictId)}', 'accept_current')">
+                                ✓ 今回を採用
+                            </button>
+                            <button class="px-2 py-1 bg-amber-500/20 text-amber-400 text-[10px] rounded hover:bg-amber-500/30" 
+                                onclick="resolveConflict('${escapeHtml(conflictId)}', 'keep_previous')">
+                                ↩ 以前を維持
+                            </button>
+                            <button class="px-2 py-1 bg-surface-3 text-slate-400 text-[10px] rounded hover:bg-surface-4" 
+                                onclick="resolveConflict('${escapeHtml(conflictId)}', 'ignore')">
+                                無視
+                            </button>
                         </div>
                     </div>
                 `;
             }).join('');
         }
 
-        window.resolveConflict = function(index, action) {
-            conflicts.splice(index, 1);
-            renderConflicts();
-            updateMetrics();
-            showToast(action === 'accept' ? '今回の内容を採用しました' : '以前の内容を維持します', 'info');
+        window.resolveConflict = async function(conflictId, resolution) {
+            if (!conflictId) {
+                // Fallback for old-style conflicts without ID (just remove from local state)
+                showToast('この矛盾は解決できません', 'error');
+                return;
+            }
+            
+            try {
+                const res = await fetch(`${API_BASE}/api/conflicts/${conflictId}/resolve`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ resolution: resolution })
+                });
+                
+                if (!res.ok) {
+                    const error = await res.json();
+                    throw new Error(error.detail || 'Failed to resolve conflict');
+                }
+                
+                // Remove from local state
+                conflicts = conflicts.filter(c => c.id !== conflictId);
+                renderConflicts();
+                updateMetrics();
+                
+                // Show appropriate message
+                const messages = {
+                    'accept_current': '今回の内容を採用しました',
+                    'keep_previous': '以前の内容を維持します',
+                    'ignore': 'この矛盾を無視しました'
+                };
+                showToast(messages[resolution] || '解決しました', 'success');
+                
+            } catch (e) {
+                console.error('Error resolving conflict:', e);
+                showToast('矛盾の解決に失敗しました: ' + e.message, 'error');
+            }
+        };
+
+        // ==================== Pending Questions ====================
+
+        function addPendingQuestion(question) {
+            // Only add if not already present (by id) and status is pending
+            if (question.id && pendingQuestions.some(q => q.id === question.id)) {
+                return;
+            }
+            if (question.status && question.status !== 'pending') {
+                return;
+            }
+            pendingQuestions.push(question);
+            renderPendingQuestions();
+        }
+
+        function markQuestionAnswered(questionId) {
+            const idx = pendingQuestions.findIndex(q => q.id === questionId);
+            if (idx !== -1) {
+                pendingQuestions[idx].status = 'answered';
+            }
+            renderPendingQuestions();
+        }
+
+        function renderPendingQuestions() {
+            const pending = pendingQuestions.filter(q => q.status === 'pending');
+
+            if (pending.length === 0) {
+                questionsSection.classList.add('hidden');
+                questionsCountBadge.textContent = '0';
+                return;
+            }
+
+            questionsSection.classList.remove('hidden');
+            questionsCountBadge.textContent = pending.length;
+
+            questionsList.innerHTML = pending.map((q) => {
+                const kindLabels = {
+                    'contradiction': '矛盾',
+                    'change': '変更',
+                    'missing': '不足',
+                    'clarification': '確認'
+                };
+                const kindColors = {
+                    'contradiction': 'text-conflict',
+                    'change': 'text-amber-400',
+                    'missing': 'text-blue-400',
+                    'clarification': 'text-purple-400'
+                };
+                const kind = q.kind || 'missing';
+                const kindLabel = kindLabels[kind] || '質問';
+                const kindColor = kindColors[kind] || 'text-blue-400';
+                const questionId = q.id || '';
+                const questionText = q.question || '';
+                const context = q.context || '';
+                const priority = q.priority || 0;
+
+                return `
+                    <div class="bg-blue-500/5 border border-blue-500/20 rounded-lg p-3" data-question-id="${escapeHtml(questionId)}">
+                        <div class="flex items-center gap-2 mb-2">
+                            <span class="text-[10px] ${kindColor} bg-white/5 px-1.5 py-0.5 rounded">${kindLabel}</span>
+                            ${priority >= 7 ? '<span class="text-[10px] text-amber-400">&#9733;</span>' : ''}
+                            <span class="text-[10px] text-slate-500 ml-auto">P${priority}</span>
+                        </div>
+                        <div class="text-xs text-white mb-1">${escapeHtml(questionText)}</div>
+                        ${context ? `
+                        <div class="text-[10px] text-slate-400 mb-2">${escapeHtml(context)}</div>
+                        ` : ''}
+                        <div class="flex gap-1">
+                            <button class="px-2 py-1 bg-blue-500/20 text-blue-400 text-[10px] rounded hover:bg-blue-500/30"
+                                onclick="insertQuestion('${escapeHtml(questionText).replace(/'/g, "\\'")}')">
+                                &#x21B5; 入力欄に挿入
+                            </button>
+                            <button class="px-2 py-1 bg-surface-3 text-slate-400 text-[10px] rounded hover:bg-surface-4"
+                                onclick="skipQuestion('${escapeHtml(questionId)}')">
+                                スキップ
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        window.insertQuestion = function(questionText) {
+            messageInput.value = questionText;
+            messageInput.focus();
+        };
+
+        window.skipQuestion = async function(questionId) {
+            if (!questionId || !sessionId) return;
+
+            try {
+                const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/questions/${questionId}/skip`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                });
+
+                if (!res.ok) {
+                    const error = await res.json();
+                    throw new Error(error.detail || 'Failed to skip question');
+                }
+
+                // Update local state
+                const idx = pendingQuestions.findIndex(q => q.id === questionId);
+                if (idx !== -1) {
+                    pendingQuestions[idx].status = 'skipped';
+                }
+                renderPendingQuestions();
+                showToast('質問をスキップしました', 'info');
+
+            } catch (e) {
+                console.error('Error skipping question:', e);
+                showToast('質問のスキップに失敗しました', 'error');
+            }
         };
 
         function updateMetrics() {
@@ -1223,6 +2331,7 @@
             topics = [];
             facts = [];
             conflicts = [];
+            pendingQuestions = [];
             
             chatMessages.innerHTML = '';
             intentInput.value = '';
@@ -1230,6 +2339,7 @@
             factTableEl.innerHTML = '<p class="text-xs text-slate-600 py-4 text-center">まだ記録がありません</p>';
             factCountEl.textContent = '0 facts';
             conflictsSection.classList.add('hidden');
+            questionsSection.classList.add('hidden');
             
             startScreen.classList.remove('hidden');
             chatScreen.classList.add('hidden');
@@ -2127,6 +3237,7 @@
         loadDocuments();
         loadKnowledgeStats();
         loadTags();
+        loadConflicts();
     </script>
 </body>
 </html>
