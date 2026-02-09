@@ -149,6 +149,7 @@ class ConsistencyIssueDetail(BaseModel):
     current_text: str
     current_source: str
     suggested_question: str
+    explanation: str = ""
     confidence: float
     resolution: str | None = None
     resolved_at: str | None = None
@@ -356,6 +357,7 @@ async def send_message(session_id: str, request: MessageRequest) -> MessageRespo
             current_text=issue.current_text,
             current_source=issue.current_source,
             suggested_question=issue.suggested_question,
+            explanation=issue.explanation,
             confidence=issue.confidence,
             resolution=issue.resolution,
             resolved_at=issue.resolved_at.isoformat() if issue.resolved_at else None,
@@ -884,6 +886,7 @@ class DocumentResponse(BaseModel):
     error_message: str | None = None
     created_at: str
     processed_at: str | None = None
+    review_session_id: str | None = None
 
 
 class DocumentListResponse(BaseModel):
@@ -1150,7 +1153,7 @@ async def list_documents():
         raise HTTPException(status_code=503, detail="Knowledge graph not available")
 
     try:
-        documents = await kg_store.get_documents()
+        doc_results = await kg_store.get_documents()
         return DocumentListResponse(
             documents=[
                 DocumentResponse(
@@ -1167,10 +1170,11 @@ async def list_documents():
                     error_message=d.error_message,
                     created_at=d.created_at.isoformat(),
                     processed_at=d.processed_at.isoformat() if d.processed_at else None,
+                    review_session_id=review_sid,
                 )
-                for d in documents
+                for d, review_sid in doc_results
             ],
-            total=len(documents),
+            total=len(doc_results),
         )
     except Exception as e:
         logger.error(f"Failed to list documents: {e}")

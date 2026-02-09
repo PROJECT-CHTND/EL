@@ -149,6 +149,7 @@ class Session(BaseModel):
     prior_knowledge: list[KnowledgeItem] = Field(default_factory=list, description="Related knowledge items")
     referenced_dates: list[datetime] = Field(default_factory=list, description="Dates referenced in this session")
     pending_questions: list[PendingQuestion] = Field(default_factory=list, description="Pending questions for the user")
+    review_document_id: str | None = Field(default=None, description="Document ID being reviewed (for document review sessions)")
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
@@ -311,6 +312,7 @@ class ConsistencyIssue(BaseModel):
     current_text: str = Field(..., description="What is being said now")
     current_source: str = Field(default="現在の会話", description="Source of current info")
     suggested_question: str = Field(default="", description="Question to clarify")
+    explanation: str = Field(default="", description="Detailed explanation of the inconsistency with context")
     confidence: float = Field(default=0.7, ge=0.0, le=1.0, description="Confidence in detection")
     # Resolution tracking
     resolution: str | None = Field(default=None, description="Resolution action: accept_current, keep_previous, ignore")

@@ -97,6 +97,12 @@ ALL_TOOLS: list[ChatCompletionToolParam] = [
     SAVE_INSIGHT_TOOL,
 ]
 
+# Tools for when knowledge has already been pre-searched and injected into the prompt.
+# Only save_insight is needed; search would be redundant and waste an LLM round-trip.
+SAVE_ONLY_TOOLS: list[ChatCompletionToolParam] = [
+    SAVE_INSIGHT_TOOL,
+]
+
 
 class ToolExecutor:
     """Executes tools and manages knowledge graph interactions."""
@@ -105,22 +111,31 @@ class ToolExecutor:
         self,
         kg_store: KnowledgeGraphStore | None = None,
         session_id: str | None = None,
+        session_domain: Domain | None = None,
     ) -> None:
         """Initialize the tool executor.
 
         Args:
             kg_store: Knowledge graph store instance. If None, tools will be no-ops.
             session_id: Session ID to associate with saved insights.
+            session_domain: Current session domain for filtering search results.
         """
         self._kg_store = kg_store
         self._session_id = session_id
+        self._session_domain = session_domain
         self._saved_insights: list[Insight] = []
+        self._saved_insight_ids: list[tuple[str, str]] = []  # (insight_id, content) for auto-tagging
         self._used_knowledge: list[KnowledgeItem] = []
 
     @property
     def saved_insights(self) -> list[Insight]:
         """Get insights saved during this execution."""
         return self._saved_insights.copy()
+
+    @property
+    def saved_insight_ids(self) -> list[tuple[str, str]]:
+        """Get (insight_id, content) tuples for insights saved during this execution."""
+        return self._saved_insight_ids.copy()
 
     @property
     def used_knowledge(self) -> list[KnowledgeItem]:
@@ -130,6 +145,7 @@ class ToolExecutor:
     def reset(self) -> None:
         """Reset the saved insights and used knowledge."""
         self._saved_insights.clear()
+        self._saved_insight_ids.clear()
         self._used_knowledge.clear()
 
     async def search_knowledge_graph(
@@ -154,7 +170,9 @@ class ToolExecutor:
             }
 
         try:
-            items = await self._kg_store.search(query, limit=limit)
+            # Apply domain filter if session has a non-general domain
+            search_domain = self._session_domain if self._session_domain and self._session_domain != Domain.GENERAL else None
+            items = await self._kg_store.search(query, limit=limit, domain=search_domain)
             self._used_knowledge.extend(items)
 
             if not items:
@@ -234,6 +252,9 @@ class ToolExecutor:
 
         try:
             insight_id = await self._kg_store.save_insight(insight, session_id=self._session_id)
+            # Track for auto-tagging
+            content_for_tagging = f"{subject} {predicate} {object}"
+            self._saved_insight_ids.append((insight_id, content_for_tagging))
             return {
                 "saved": True,
                 "message": "洞察を知識グラフに保存しました。",
