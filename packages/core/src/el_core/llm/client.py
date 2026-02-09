@@ -1,4 +1,4 @@
-"""LLM Client for GPT-5.2 with tool calling support."""
+"""LLM Client for GPT-5.2 with tool calling support and multi-tier model selection."""
 
 from __future__ import annotations
 
@@ -18,9 +18,20 @@ logger = logging.getLogger(__name__)
 
 
 class LLMClient:
-    """Async client for GPT-5.2 with function calling support."""
+    """Async client with multi-tier model support.
+
+    Three model tiers are available:
+    - MODEL_FLAGSHIP (gpt-5.2): Main conversation responses visible to users.
+    - MODEL_MID (gpt-5-mini): Structured analysis tasks (consistency checks, extraction).
+    - MODEL_FAST (gpt-5-nano): Simple classification / tagging tasks.
+    """
 
     DEFAULT_MODEL = "gpt-5.2"
+
+    # --- Model tier constants (resolved from env at class-load time) ---
+    MODEL_FLAGSHIP: str = os.getenv("OPENAI_MODEL", "gpt-5.2")
+    MODEL_MID: str = os.getenv("OPENAI_MODEL_MID", "gpt-5-mini")
+    MODEL_FAST: str = os.getenv("OPENAI_MODEL_FAST", "gpt-5-nano")
 
     def __init__(
         self,
@@ -48,6 +59,7 @@ class LLMClient:
         self,
         messages: list[ChatCompletionMessageParam],
         *,
+        model: str | None = None,
         tools: list[ChatCompletionToolParam] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         max_tokens: int = 4096,
@@ -57,6 +69,7 @@ class LLMClient:
 
         Args:
             messages: List of messages in OpenAI format.
+            model: Model override for this call. Falls back to instance default.
             tools: Optional list of tools available to the model.
             tool_choice: How to select tools ("auto", "none", or specific tool).
             max_tokens: Maximum tokens in response.
@@ -65,9 +78,10 @@ class LLMClient:
         Returns:
             The assistant's response message.
         """
+        resolved_model = model or self._model
         # GPT-5 uses max_completion_tokens instead of max_tokens
         kwargs: dict[str, Any] = {
-            "model": self._model,
+            "model": resolved_model,
             "messages": messages,
             "max_completion_tokens": max_tokens,
         }
@@ -100,6 +114,7 @@ class LLMClient:
         tools: list[ChatCompletionToolParam],
         tool_handlers: dict[str, Any],
         *,
+        model: str | None = None,
         max_tool_rounds: int = 5,
         max_tokens: int = 4096,
     ) -> tuple[str, list[dict[str, Any]]]:
@@ -109,6 +124,7 @@ class LLMClient:
             messages: List of messages.
             tools: List of available tools.
             tool_handlers: Dict mapping tool names to handler functions.
+            model: Model override for this call. Falls back to instance default.
             max_tool_rounds: Maximum number of tool calling rounds.
             max_tokens: Maximum tokens per response.
 
@@ -121,6 +137,7 @@ class LLMClient:
         for _ in range(max_tool_rounds):
             response = await self.chat(
                 current_messages,
+                model=model,
                 tools=tools,
                 tool_choice="auto",
                 max_tokens=max_tokens,
@@ -180,6 +197,7 @@ class LLMClient:
         # Max rounds reached, get final response without tools
         final_response = await self.chat(
             current_messages,
+            model=model,
             tools=None,
             max_tokens=max_tokens,
         )

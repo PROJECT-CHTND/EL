@@ -290,10 +290,15 @@
                 <div class="flex-none p-3 border-b border-white/5">
                     <button 
                         id="new-session-btn"
-                        class="w-full py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
+                        class="w-full py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                        <span>+</span>
-                        <span>新しいセッション</span>
+                        <span id="new-session-btn-text">+ 新しいセッション</span>
+                        <span id="new-session-btn-spinner" class="hidden">
+                            <svg class="animate-spin h-4 w-4 text-current" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                        </span>
                     </button>
                 </div>
                 <div class="flex-1 overflow-y-auto p-3">
@@ -313,6 +318,16 @@
                 <!-- Start Screen -->
                 <div id="start-screen" class="flex-1 flex items-center justify-center p-6">
                     <div class="w-full max-w-md">
+                        <!-- Pending document review banner -->
+                        <div id="pending-review-banner" class="hidden mb-6 p-4 bg-accent/5 border border-accent/15 rounded-xl">
+                            <div class="flex items-center gap-2 mb-2">
+                                <span class="text-base">📋</span>
+                                <span class="text-sm text-white font-medium">レビュー待ちのドキュメント</span>
+                            </div>
+                            <p class="text-[11px] text-slate-500 mb-3">分析が完了したドキュメントがあります。内容を確認して事実の正確性をチェックしましょう。</p>
+                            <div id="pending-review-list" class="space-y-1.5"></div>
+                        </div>
+
                         <div class="text-center mb-8">
                             <h2 class="text-xl font-semibold text-white mb-2">新しいセッション</h2>
                             <p class="text-sm text-slate-500">話したいことを入力してください</p>
@@ -330,9 +345,16 @@
                             </div>
                             <button 
                                 type="submit"
-                                class="w-full py-3 bg-accent hover:bg-accent-bright text-surface-0 font-medium rounded-lg transition-colors text-sm"
+                                id="start-btn"
+                                class="w-full py-3 bg-accent hover:bg-accent-bright text-surface-0 font-medium rounded-lg transition-colors text-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                             >
-                                開始
+                                <span id="start-btn-text">開始</span>
+                                <span id="start-btn-spinner" class="hidden">
+                                    <svg class="animate-spin h-4 w-4 text-current" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                </span>
                             </button>
                         </form>
                     </div>
@@ -371,7 +393,7 @@
             <div id="resize-handle-right" class="resize-handle"></div>
 
             <!-- ===== RIGHT PANE: Knowledge Studio ===== -->
-            <aside id="right-pane" class="border-l border-white/5 flex flex-col min-h-0 bg-surface-0 overflow-y-auto" style="width: 380px; min-width: 280px; max-width: 600px; flex-shrink: 0;">
+            <aside id="right-pane" class="border-l border-white/5 flex flex-col min-h-0 bg-surface-0 overflow-y-auto" style="width: 380px; min-width: 280px; flex-shrink: 0;">
                 
                 <!-- 1. Knowledge Map + Metrics -->
                 <div class="flex-none p-4 border-b border-white/5">
@@ -382,16 +404,16 @@
                     <div id="knowledge-map-canvas" class="bg-surface-1 rounded-lg overflow-hidden mb-3"></div>
                     <div class="grid grid-cols-3 gap-2 text-center">
                         <div class="bg-surface-2 rounded-lg p-2">
-                            <div id="metric-coverage" class="text-lg font-semibold text-white">0%</div>
-                            <div class="text-[10px] text-slate-500">Coverage</div>
+                            <div id="metric-facts" class="text-lg font-semibold text-blue-400">0</div>
+                            <div class="text-[10px] text-slate-500">Facts</div>
                         </div>
                         <div class="bg-surface-2 rounded-lg p-2">
-                            <div id="metric-verified" class="text-lg font-semibold text-verified">0</div>
-                            <div class="text-[10px] text-slate-500">Verified</div>
+                            <div id="metric-tags" class="text-lg font-semibold text-violet-400">0</div>
+                            <div class="text-[10px] text-slate-500">Tags</div>
                         </div>
                         <div class="bg-surface-2 rounded-lg p-2">
                             <div id="metric-conflicts" class="text-lg font-semibold text-conflict">0</div>
-                            <div class="text-[10px] text-slate-500">Conflicts</div>
+                            <div class="text-[10px] text-slate-500">矛盾</div>
                         </div>
                     </div>
                 </div>
@@ -414,15 +436,6 @@
                     </div>
                 </div>
 
-                <!-- 3. Topic Coverage -->
-                <div class="flex-none p-4 border-b border-white/5">
-                    <div class="flex items-center justify-between mb-2">
-                        <h3 class="text-xs font-medium text-slate-400 uppercase tracking-wider">Topic Coverage</h3>
-                    </div>
-                    <div id="topic-coverage-list" class="flex flex-wrap gap-1.5">
-                        <span class="text-xs text-slate-600">トピックがありません</span>
-                    </div>
-                </div>
 
                 <!-- 4. Evidence Ledger (Fact Table) - Collapsible -->
                 <div class="flex-1 min-h-0 overflow-hidden flex flex-col border-t border-white/5">
@@ -463,11 +476,11 @@
                 <!-- 5. Knowledge Summary (collapsible) - Tags integrated -->
                 <div id="knowledge-summary-section" class="flex-none border-t border-white/5">
                     <button id="summary-toggle" class="w-full px-4 py-2.5 flex items-center justify-between text-left hover:bg-surface-2 transition-colors">
-                        <span class="text-xs font-medium text-purple-400">📊 Knowledge Summary</span>
                         <div class="flex items-center gap-2">
-                            <span id="tags-count-badge" class="text-[10px] text-slate-500">0 tags</span>
-                            <span id="summary-status" class="text-[10px] text-slate-500">クリックで展開</span>
+                            <span id="summary-arrow" class="text-[10px] text-slate-500 transition-transform duration-200">▶</span>
+                            <h3 class="text-xs font-medium text-slate-400 uppercase tracking-wider">Knowledge Summary</h3>
                         </div>
+                        <span id="tags-count-badge" class="text-[10px] text-slate-500">0 tags</span>
                     </button>
                     <div id="summary-panel" class="px-4 pb-3 space-y-3 hidden">
                         <!-- Stats Row -->
@@ -534,16 +547,16 @@
                 <!-- Metrics Bar (bottom) -->
                 <div class="absolute bottom-0 left-0 right-0 flex items-center justify-center gap-6 px-5 py-3 z-10 bg-gradient-to-t from-black/40 to-transparent rounded-b-2xl">
                     <div class="text-center">
-                        <span id="km-modal-coverage" class="text-lg font-semibold text-white">0%</span>
-                        <span class="text-[10px] text-slate-400 ml-1">Coverage</span>
+                        <span id="km-modal-facts" class="text-lg font-semibold text-blue-400">0</span>
+                        <span class="text-[10px] text-slate-400 ml-1">Facts</span>
                     </div>
                     <div class="text-center">
-                        <span id="km-modal-verified" class="text-lg font-semibold text-verified">0</span>
-                        <span class="text-[10px] text-slate-400 ml-1">Verified</span>
+                        <span id="km-modal-tags" class="text-lg font-semibold text-violet-400">0</span>
+                        <span class="text-[10px] text-slate-400 ml-1">Tags</span>
                     </div>
                     <div class="text-center">
                         <span id="km-modal-conflicts" class="text-lg font-semibold text-conflict">0</span>
-                        <span class="text-[10px] text-slate-400 ml-1">Conflicts</span>
+                        <span class="text-[10px] text-slate-400 ml-1">矛盾</span>
                     </div>
                 </div>
             </div>
@@ -1729,7 +1742,6 @@
         // State
         let sessionId = null;
         let currentIntent = '';
-        let topics = [];
         let facts = [];
         let conflicts = [];
         let pendingQuestions = [];
@@ -1743,7 +1755,6 @@
         const intentInput = document.getElementById('intent-input');
         const messageInput = document.getElementById('message-input');
         const chatMessages = document.getElementById('chat-messages');
-        const topicCoverageEl = document.getElementById('topic-coverage-list');
         const factTableEl = document.getElementById('fact-table');
         const factCountEl = document.getElementById('fact-count');
         const factTableWrapper = document.getElementById('fact-table-wrapper');
@@ -1751,7 +1762,12 @@
         const factLedgerArrow = document.getElementById('fact-ledger-arrow');
         const sessionListEl = document.getElementById('session-list');
         const sendBtn = document.getElementById('send-btn');
+        const startBtn = document.getElementById('start-btn');
+        const startBtnText = document.getElementById('start-btn-text');
+        const startBtnSpinner = document.getElementById('start-btn-spinner');
         const newSessionBtn = document.getElementById('new-session-btn');
+        const newSessionBtnText = document.getElementById('new-session-btn-text');
+        const newSessionBtnSpinner = document.getElementById('new-session-btn-spinner');
         const headerStatus = document.getElementById('header-status');
         const conflictsSection = document.getElementById('conflicts-section');
         const conflictsToggle = document.getElementById('conflicts-toggle');
@@ -1763,8 +1779,8 @@
         const questionsCountBadge = document.getElementById('questions-count-badge');
         
         // Metrics
-        const metricCoverage = document.getElementById('metric-coverage');
-        const metricVerified = document.getElementById('metric-verified');
+        const metricFacts = document.getElementById('metric-facts');
+        const metricTags = document.getElementById('metric-tags');
         const metricConflicts = document.getElementById('metric-conflicts');
 
         const API_BASE = window.location.origin;
@@ -1793,6 +1809,18 @@
             resizeHandleLeft.style.display = 'none';
         }
 
+        // Function to get right pane max width based on left pane state
+        function getRightPaneMaxWidth() {
+            const viewportWidth = window.innerWidth;
+            if (leftPaneCollapsed) {
+                // Left pane is collapsed, allow up to 80% of viewport width
+                return Math.floor(viewportWidth * 0.8);
+            } else {
+                // Left pane is visible, use fixed max width
+                return 600;
+            }
+        }
+
         // Generic resize handler factory
         function createResizeHandler(pane, handle, side) {
             let startX, startWidth;
@@ -1811,9 +1839,15 @@
 
             function onMouseMove(e) {
                 const delta = side === 'left' ? (e.clientX - startX) : (startX - e.clientX);
+                let maxWidth;
+                if (side === 'right') {
+                    maxWidth = getRightPaneMaxWidth();
+                } else {
+                    maxWidth = parseInt(pane.style.maxWidth) || 600;
+                }
                 const newWidth = Math.max(
                     parseInt(pane.style.minWidth) || 180,
-                    Math.min(parseInt(pane.style.maxWidth) || 600, startWidth + delta)
+                    Math.min(maxWidth, startWidth + delta)
                 );
                 pane.style.width = newWidth + 'px';
                 // Keep knowledge map centered during drag
@@ -1849,11 +1883,37 @@
                 leftPane.classList.add('collapsed');
                 resizeHandleLeft.style.display = 'none';
                 localStorage.setItem('el-left-pane-collapsed', 'true');
+                // Update right pane max width when left pane is collapsed
+                const currentRightWidth = rightPane.getBoundingClientRect().width;
+                const maxRightWidth = getRightPaneMaxWidth();
+                if (currentRightWidth > maxRightWidth) {
+                    rightPane.style.width = maxRightWidth + 'px';
+                    localStorage.setItem('el-right-pane-width', maxRightWidth);
+                }
             } else {
                 leftPane.classList.remove('collapsed');
                 leftPane.style.width = (savedLeftWidth || 260) + 'px';
                 resizeHandleLeft.style.display = '';
                 localStorage.removeItem('el-left-pane-collapsed');
+                // Restore right pane max width when left pane is expanded
+                const currentRightWidth = rightPane.getBoundingClientRect().width;
+                const maxRightWidth = getRightPaneMaxWidth();
+                if (currentRightWidth > maxRightWidth) {
+                    rightPane.style.width = maxRightWidth + 'px';
+                    localStorage.setItem('el-right-pane-width', maxRightWidth);
+                }
+            }
+        });
+
+        // Update right pane max width on window resize
+        window.addEventListener('resize', () => {
+            if (leftPaneCollapsed) {
+                const currentRightWidth = rightPane.getBoundingClientRect().width;
+                const maxRightWidth = getRightPaneMaxWidth();
+                if (currentRightWidth > maxRightWidth) {
+                    rightPane.style.width = maxRightWidth + 'px';
+                    localStorage.setItem('el-right-pane-width', maxRightWidth);
+                }
             }
         });
 
@@ -1874,8 +1934,8 @@
 
         function openKnowledgeMapModal() {
             // Sync metrics
-            document.getElementById('km-modal-coverage').textContent = document.getElementById('metric-coverage').textContent;
-            document.getElementById('km-modal-verified').textContent = document.getElementById('metric-verified').textContent;
+            document.getElementById('km-modal-facts').textContent = document.getElementById('metric-facts').textContent;
+            document.getElementById('km-modal-tags').textContent = document.getElementById('metric-tags').textContent;
             document.getElementById('km-modal-conflicts').textContent = document.getElementById('metric-conflicts').textContent;
 
             // Show modal
@@ -2012,6 +2072,9 @@
             if (!intent || isStarting) return;
             
             isStarting = true;
+            startBtn.disabled = true;
+            startBtnText.textContent = '開始中...';
+            startBtnSpinner.classList.remove('hidden');
             updateStatus('開始中...');
             
             try {
@@ -2031,6 +2094,8 @@
                 startScreen.classList.add('hidden');
                 chatScreen.classList.remove('hidden');
                 
+                // Show user's initial input as the first message in chat
+                addMessage(intent, 'user');
                 addMessage(data.opening_message, 'assistant');
                 messageInput.focus();
                 updateStatus('Collecting');
@@ -2045,6 +2110,9 @@
                 showToast('セッションの開始に失敗しました', 'error');
             } finally {
                 isStarting = false;
+                startBtn.disabled = false;
+                startBtnText.textContent = '開始';
+                startBtnSpinner.classList.add('hidden');
             }
         });
 
@@ -2191,6 +2259,9 @@
                 loadKnowledgeStats(); // Update stats after each message
                 updateStatus('Collecting');
                 
+                // Show in-chat notice if documents are pending review
+                showDocumentReviewNoticeInChat();
+                
             } catch (err) {
                 console.error('Error sending message:', err);
                 removeTyping(typingId);
@@ -2204,10 +2275,16 @@
 
         // New session button (replaces end session button)
         newSessionBtn.addEventListener('click', async () => {
+            // Prevent multiple clicks
+            if (newSessionBtn.disabled) return;
+            
             // If there's an active session, end it first
             if (sessionId) {
                 if (!confirm('セッションを終了して新しいセッションを開始しますか？')) return;
                 
+                newSessionBtn.disabled = true;
+                newSessionBtnText.textContent = '終了中...';
+                newSessionBtnSpinner.classList.remove('hidden');
                 updateStatus('要約生成中...');
                 
                 try {
@@ -2223,6 +2300,10 @@
                     
                 } catch (err) {
                     console.error('Error ending session:', err);
+                } finally {
+                    newSessionBtn.disabled = false;
+                    newSessionBtnText.textContent = '+ 新しいセッション';
+                    newSessionBtnSpinner.classList.add('hidden');
                 }
             }
             
@@ -2439,56 +2520,65 @@
             if (unresolvedConflicts.length === 0) {
                 conflictsSection.classList.add('hidden');
                 conflictsCountBadge.textContent = '0';
-                metricConflicts.textContent = '0';
+                updateMetrics();
                 return;
             }
             
             conflictsSection.classList.remove('hidden');
             conflictsCountBadge.textContent = unresolvedConflicts.length;
-            metricConflicts.textContent = unresolvedConflicts.length;
+            updateMetrics();
             
             conflictsList.innerHTML = unresolvedConflicts.map((c) => {
                 // Handle both snake_case (API) and camelCase field names
                 const conflictId = c.id || '';
                 const prevText = c.previous_text || c.previousText || c.previous?.text || c.previous || '(不明)';
                 const currText = c.current_text || c.currentText || c.current?.text || c.current || '(不明)';
+                const prevSource = c.previous_source || c.previousSource || '';
                 const title = c.title || c.subject || '情報の変更';
                 const kind = c.kind || 'change';
                 const kindLabel = kind === 'contradiction' ? '矛盾' : '変更';
                 const kindColor = kind === 'contradiction' ? 'text-conflict' : 'text-amber-400';
+                const kindBorderColor = kind === 'contradiction' ? 'border-conflict/30' : 'border-amber-400/20';
                 const suggestedQ = c.suggested_question || c.suggestedQuestion || '';
+                const explanation = c.explanation || '';
                 
                 return `
-                    <div class="bg-conflict/5 border border-conflict/20 rounded-lg p-3" data-conflict-id="${escapeHtml(conflictId)}">
-                        <div class="flex items-center gap-2 mb-2">
-                            <span class="text-[10px] ${kindColor} bg-white/5 px-1.5 py-0.5 rounded">${kindLabel}</span>
-                            <span class="text-xs text-white flex-1">${escapeHtml(title)}</span>
+                    <div class="bg-surface-2 border ${kindBorderColor} rounded-lg overflow-hidden" data-conflict-id="${escapeHtml(conflictId)}">
+                        <div class="px-3 py-2 border-b border-white/5 flex items-center gap-2">
+                            <span class="text-[10px] ${kindColor} bg-white/5 px-1.5 py-0.5 rounded font-medium">${kindLabel}</span>
+                            <span class="text-xs text-white font-medium flex-1">${escapeHtml(title)}</span>
+                            ${prevSource ? `<span class="text-[9px] text-slate-600">${escapeHtml(prevSource)}</span>` : ''}
                         </div>
-                        <div class="space-y-1 mb-2">
-                            <div class="text-[10px]">
-                                <span class="text-slate-500">以前:</span>
+                        ${explanation ? `
+                        <div class="px-3 py-2 bg-white/[0.02] border-b border-white/5">
+                            <p class="text-[11px] text-slate-300 leading-relaxed">${escapeHtml(explanation)}</p>
+                        </div>
+                        ` : ''}
+                        <div class="px-3 py-2 space-y-1.5">
+                            <div class="text-[11px] bg-surface-3/50 rounded px-2 py-1.5">
+                                <span class="text-slate-500 font-medium">以前:</span>
                                 <span class="text-slate-300 ml-1">${escapeHtml(prevText)}</span>
                             </div>
-                            <div class="text-[10px]">
-                                <span class="text-slate-500">今回:</span>
+                            <div class="text-[11px] bg-surface-3/50 rounded px-2 py-1.5">
+                                <span class="text-slate-500 font-medium">今回:</span>
                                 <span class="text-white ml-1">${escapeHtml(currText)}</span>
                             </div>
                         </div>
                         ${suggestedQ ? `
-                        <div class="text-[10px] text-blue-400/80 mb-3 italic">
-                            💡 ${escapeHtml(suggestedQ)}
+                        <div class="px-3 py-2 border-t border-white/5">
+                            <p class="text-[11px] text-blue-400/80 italic leading-relaxed">💡 ${escapeHtml(suggestedQ)}</p>
                         </div>
                         ` : ''}
-                        <div class="flex gap-1">
-                            <button class="px-2 py-1 bg-verified/20 text-verified text-[10px] rounded hover:bg-verified/30" 
+                        <div class="flex border-t border-white/5">
+                            <button class="flex-1 py-2 text-center text-verified text-[10px] font-medium hover:bg-verified/10 transition-colors border-r border-white/5" 
                                 onclick="resolveConflict('${escapeHtml(conflictId)}', 'accept_current')">
                                 ✓ 今回を採用
                             </button>
-                            <button class="px-2 py-1 bg-amber-500/20 text-amber-400 text-[10px] rounded hover:bg-amber-500/30" 
+                            <button class="flex-1 py-2 text-center text-amber-400 text-[10px] font-medium hover:bg-amber-500/10 transition-colors border-r border-white/5" 
                                 onclick="resolveConflict('${escapeHtml(conflictId)}', 'keep_previous')">
                                 ↩ 以前を維持
                             </button>
-                            <button class="px-2 py-1 bg-surface-3 text-slate-400 text-[10px] rounded hover:bg-surface-4" 
+                            <button class="flex-1 py-2 text-center text-slate-500 text-[10px] hover:bg-white/5 transition-colors" 
                                 onclick="resolveConflict('${escapeHtml(conflictId)}', 'ignore')">
                                 無視
                             </button>
@@ -2602,24 +2692,76 @@
                         ${context ? `
                         <div class="text-[10px] text-slate-400 mb-2">${escapeHtml(context)}</div>
                         ` : ''}
-                        <div class="flex gap-1">
-                            <button class="px-2 py-1 bg-blue-500/20 text-blue-400 text-[10px] rounded hover:bg-blue-500/30"
-                                onclick="insertQuestion('${escapeHtml(questionText).replace(/'/g, "\\'")}')">
-                                &#x21B5; 入力欄に挿入
-                            </button>
-                            <button class="px-2 py-1 bg-surface-3 text-slate-400 text-[10px] rounded hover:bg-surface-4"
-                                onclick="skipQuestion('${escapeHtml(questionId)}')">
-                                スキップ
-                            </button>
+                        <div id="question-actions-${escapeHtml(questionId)}" class="flex flex-col gap-1.5">
+                            <div id="question-answer-form-${escapeHtml(questionId)}" class="hidden">
+                                <textarea class="w-full bg-surface-2 border border-white/10 rounded text-xs text-white p-2 resize-none focus:border-blue-400/50 focus:outline-none placeholder-slate-500"
+                                    rows="2"
+                                    placeholder="回答を入力..."
+                                    id="question-answer-input-${escapeHtml(questionId)}"></textarea>
+                                <div class="flex gap-1 mt-1">
+                                    <button class="px-2 py-1 bg-emerald-500/20 text-emerald-400 text-[10px] rounded hover:bg-emerald-500/30"
+                                        onclick="submitAnswer('${escapeHtml(questionId).replace(/'/g, "\\'")}', '${escapeHtml(questionText).replace(/'/g, "\\'")}')">
+                                        送信
+                                    </button>
+                                    <button class="px-2 py-1 bg-surface-3 text-slate-400 text-[10px] rounded hover:bg-surface-4"
+                                        onclick="cancelAnswer('${escapeHtml(questionId).replace(/'/g, "\\'")}')">
+                                        キャンセル
+                                    </button>
+                                </div>
+                            </div>
+                            <div id="question-buttons-${escapeHtml(questionId)}" class="flex gap-1">
+                                <button class="px-2 py-1 bg-emerald-500/20 text-emerald-400 text-[10px] rounded hover:bg-emerald-500/30"
+                                    onclick="showAnswerForm('${escapeHtml(questionId).replace(/'/g, "\\'")}')">
+                                    &#x270D; 回答する
+                                </button>
+                                <button class="px-2 py-1 bg-surface-3 text-slate-400 text-[10px] rounded hover:bg-surface-4"
+                                    onclick="skipQuestion('${escapeHtml(questionId)}')">
+                                    スキップ
+                                </button>
+                            </div>
                         </div>
                     </div>
                 `;
             }).join('');
         }
 
-        window.insertQuestion = function(questionText) {
-            messageInput.value = questionText;
-            messageInput.focus();
+        window.showAnswerForm = function(questionId) {
+            const form = document.getElementById(`question-answer-form-${questionId}`);
+            const buttons = document.getElementById(`question-buttons-${questionId}`);
+            if (form) form.classList.remove('hidden');
+            if (buttons) buttons.classList.add('hidden');
+            const input = document.getElementById(`question-answer-input-${questionId}`);
+            if (input) input.focus();
+        };
+
+        window.cancelAnswer = function(questionId) {
+            const form = document.getElementById(`question-answer-form-${questionId}`);
+            const buttons = document.getElementById(`question-buttons-${questionId}`);
+            if (form) form.classList.add('hidden');
+            if (buttons) buttons.classList.remove('hidden');
+            const input = document.getElementById(`question-answer-input-${questionId}`);
+            if (input) input.value = '';
+        };
+
+        window.submitAnswer = async function(questionId, questionText) {
+            const input = document.getElementById(`question-answer-input-${questionId}`);
+            if (!input) return;
+            const answer = input.value.trim();
+            if (!answer) {
+                showToast('回答を入力してください', 'warning');
+                return;
+            }
+
+            // Build contextual message: include the question being answered
+            const contextMessage = `【質問への回答】${questionText}\n→ ${answer}`;
+
+            // Send as a chat message so the agent can process it naturally
+            messageInput.value = contextMessage;
+            chatForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+
+            // Clean up the answer form
+            input.value = '';
+            cancelAnswer(questionId);
         };
 
         window.skipQuestion = async function(questionId) {
@@ -2651,13 +2793,16 @@
         };
 
         function updateMetrics() {
-            const verified = facts.filter(f => f.verified).length;
-            const total = facts.length;
-            const coverage = total > 0 ? Math.round((verified / total) * 100) : 0;
+            // Facts count
+            metricFacts.textContent = facts.length;
             
-            metricCoverage.textContent = coverage + '%';
-            metricVerified.textContent = verified;
-            metricConflicts.textContent = conflicts.length;
+            // Tags count
+            const tagCount = (typeof tagsData !== 'undefined' && Array.isArray(tagsData)) ? tagsData.length : 0;
+            metricTags.textContent = tagCount;
+            
+            // Unresolved conflicts count
+            const unresolvedCount = conflicts.filter(c => !c.status || c.status === 'unresolved').length;
+            metricConflicts.textContent = unresolvedCount;
         }
 
         function updateStatus(text) {
@@ -2701,10 +2846,144 @@
             modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
         }
 
+        // =====================================================
+        // Document Review (Hybrid approach: non-intrusive)
+        // =====================================================
+
+        // Start document review session (called from sidebar badge or start screen banner)
+        async function startDocumentReview(docId, filename) {
+            if (isStarting) return;
+
+            // If already in a session, ask for confirmation
+            if (sessionId) {
+                if (!confirm(`現在のセッションを終了して「${filename}」のレビューを開始しますか？`)) return;
+                try {
+                    await fetch(`${API_BASE}/api/sessions/${sessionId}/end`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                } catch (e) {
+                    console.error('Error ending session:', e);
+                }
+                resetSession();
+            }
+
+            // Check if there's an existing active review session for this document
+            const existingDoc = uploadedDocuments.find(d => d.id === docId);
+            if (existingDoc && existingDoc.review_session_id) {
+                // Resume existing review session instead of creating a new one
+                _pendingReviewDocs = _pendingReviewDocs.filter(d => d.id !== docId);
+                renderPendingReviewBanner();
+                await resumeSession(existingDoc.review_session_id);
+                return;
+            }
+
+            isStarting = true;
+            updateStatus('ドキュメントレビュー開始中...');
+
+            try {
+                const res = await fetch(`${API_BASE}/api/documents/${docId}/review`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ topic: `ドキュメント「${filename}」の確認`, user_id: USER_ID })
+                });
+
+                if (!res.ok) throw new Error('Failed to start document review session');
+
+                const data = await res.json();
+                sessionId = data.session_id;
+                currentIntent = `ドキュメント「${filename}」の確認`;
+
+                // Remove from pending review queue
+                _pendingReviewDocs = _pendingReviewDocs.filter(d => d.id !== docId);
+                renderPendingReviewBanner();
+
+                // Switch to chat screen
+                startScreen.classList.add('hidden');
+                chatScreen.classList.remove('hidden');
+                chatMessages.innerHTML = '';
+
+                // Show initial exchange in chat
+                addMessage(currentIntent, 'user');
+                addMessage(data.opening_message, 'assistant');
+                messageInput.focus();
+                updateStatus('Collecting');
+
+                if (data.prior_knowledge_count > 0) {
+                    showToast(`${data.prior_knowledge_count}件の過去の記録と照合しました`, 'info');
+                    if (knowledgeMap) knowledgeMap.onFactVerified(data.prior_knowledge_count);
+                }
+
+            } catch (err) {
+                console.error('Error starting document review:', err);
+                showToast(`❌ ドキュメントレビューの開始に失敗しました`, 'error');
+            } finally {
+                isStarting = false;
+            }
+        }
+        // Expose for onclick in rendered HTML
+        window.startDocumentReview = startDocumentReview;
+
+        // In-chat notification shown after AI response when pending reviews exist
+        function showDocumentReviewNoticeInChat() {
+            if (_pendingReviewDocs.length === 0 || _reviewNotifiedInChat) return;
+            _reviewNotifiedInChat = true;
+
+            const docs = _pendingReviewDocs;
+            const docList = docs.map(d => {
+                const factsInfo = d.extracted_facts_count ? `${d.extracted_facts_count}件の事実を抽出` : '分析完了';
+                return `<div class="flex items-center justify-between gap-2 py-1">
+                    <span class="text-xs text-slate-300 truncate">📄 ${escapeHtml(d.filename)}<span class="text-slate-500 ml-1">（${factsInfo}）</span></span>
+                    <button onclick="startDocumentReview('${d.id}', '${escapeHtml(d.filename)}')" 
+                        class="shrink-0 text-[10px] text-accent hover:text-accent-bright underline underline-offset-2">レビュー開始</button>
+                </div>`;
+            }).join('');
+
+            const div = document.createElement('div');
+            div.className = 'fade-up flex justify-center my-2';
+            div.innerHTML = `
+                <div class="bg-surface-2/80 border border-white/5 rounded-xl px-4 py-3 max-w-[85%] backdrop-blur-sm">
+                    <p class="text-[11px] text-slate-400 mb-1.5">📋 分析が完了したドキュメントがあります。会話が終わったらレビューできます。</p>
+                    <div class="divide-y divide-white/5">${docList}</div>
+                </div>
+            `;
+            chatMessages.appendChild(div);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        // Start screen banner for pending reviews
+        function renderPendingReviewBanner() {
+            const banner = document.getElementById('pending-review-banner');
+            if (!banner) return;
+
+            if (_pendingReviewDocs.length === 0) {
+                banner.classList.add('hidden');
+                return;
+            }
+
+            banner.classList.remove('hidden');
+            const listEl = document.getElementById('pending-review-list');
+            if (!listEl) return;
+
+            listEl.innerHTML = _pendingReviewDocs.map(d => {
+                const factsInfo = d.extracted_facts_count ? `${d.extracted_facts_count}件の事実` : '';
+                return `
+                    <button onclick="startDocumentReview('${d.id}', '${escapeHtml(d.filename)}')"
+                        class="w-full flex items-center gap-2 p-2 rounded-lg bg-surface-2 hover:bg-surface-3 border border-white/5 hover:border-accent/30 transition-all text-left group">
+                        <span class="text-base">📄</span>
+                        <div class="flex-1 min-w-0">
+                            <p class="text-xs text-white truncate group-hover:text-accent transition-colors">${escapeHtml(d.filename)}</p>
+                            ${factsInfo ? `<p class="text-[10px] text-slate-500">${factsInfo}を抽出済み</p>` : ''}
+                        </div>
+                        <span class="text-[10px] text-accent opacity-0 group-hover:opacity-100 transition-opacity shrink-0">レビュー開始 →</span>
+                    </button>
+                `;
+            }).join('');
+        }
+
         function resetSession() {
             sessionId = null;
             currentIntent = '';
-            topics = [];
             facts = [];
             conflicts = [];
             pendingQuestions = [];
@@ -2718,10 +2997,26 @@
             startScreen.classList.remove('hidden');
             chatScreen.classList.add('hidden');
             
+            // Reset button states
+            isStarting = false;
+            if (startBtn) {
+                startBtn.disabled = false;
+                startBtnText.textContent = '開始';
+                startBtnSpinner.classList.add('hidden');
+            }
+            if (newSessionBtn) {
+                newSessionBtn.disabled = false;
+                newSessionBtnText.textContent = '+ 新しいセッション';
+                newSessionBtnSpinner.classList.add('hidden');
+            }
+            
             updateStatus('待機中');
+            _reviewNotifiedInChat = false; // Reset for next session
             loadSessions();
             // Reload all facts from knowledge graph (keeps document-derived facts visible)
             loadAllFacts();
+            // Show pending review banner on start screen
+            renderPendingReviewBanner();
         }
 
         function escapeHtml(str) {
@@ -2745,16 +3040,17 @@
         
         const summaryToggle = document.getElementById('summary-toggle');
         const summaryPanel = document.getElementById('summary-panel');
-        const summaryStatus = document.getElementById('summary-status');
         const generateSummaryBtn = document.getElementById('generate-summary-btn');
         
         let uploadedDocuments = [];
         let knowledgeStats = { total_facts: 0, total_documents: 0, total_sessions: 0, topics: [], entities: [] };
 
         // Toggle summary panel
+        const summaryArrow = document.getElementById('summary-arrow');
         summaryToggle?.addEventListener('click', () => {
-            summaryPanel.classList.toggle('hidden');
-            if (!summaryPanel.classList.contains('hidden')) {
+            const isHidden = summaryPanel.classList.toggle('hidden');
+            if (summaryArrow) summaryArrow.textContent = isHidden ? '▶' : '▼';
+            if (!isHidden) {
                 loadKnowledgeStats();
             }
         });
@@ -2825,6 +3121,9 @@
         }
 
         let _prevDocStatuses = {};
+        let _pendingReviewDocs = []; // Docs that completed analysis but haven't been reviewed yet
+        let _reviewNotifiedInChat = false; // Whether in-chat notification has been shown
+        let _initialDocLoadDone = false;
         async function loadDocuments() {
             try {
                 const response = await fetch(`${API_BASE}/api/documents`);
@@ -2839,8 +3138,31 @@
                 uploadedDocuments.forEach(d => {
                     if (d.status === 'completed' && _prevDocStatuses[d.id] && _prevDocStatuses[d.id] !== 'completed') {
                         newlyCompleted = true;
+                        // Add to pending review queue if not already there
+                        if (!_pendingReviewDocs.some(p => p.id === d.id)) {
+                            _pendingReviewDocs.push(d);
+                            _reviewNotifiedInChat = false; // Reset so next AI response mentions it
+                            // Show subtle toast notification
+                            showToast(`📄 「${d.filename}」の分析が完了しました`, 'info');
+                        }
                     }
                 });
+                
+                // On initial page load: restore pending review docs from API data
+                // Documents that are completed and have an active (non-ended) review session
+                // should be shown in the pending review banner
+                if (!_initialDocLoadDone) {
+                    _initialDocLoadDone = true;
+                    uploadedDocuments.forEach(d => {
+                        if (d.status === 'completed' && d.review_session_id) {
+                            // Has an active review session — add to pending review queue
+                            if (!_pendingReviewDocs.some(p => p.id === d.id)) {
+                                _pendingReviewDocs.push(d);
+                            }
+                        }
+                    });
+                }
+                
                 // Save current statuses
                 _prevDocStatuses = {};
                 uploadedDocuments.forEach(d => _prevDocStatuses[d.id] = d.status);
@@ -2848,6 +3170,9 @@
                 if (newlyCompleted && knowledgeMap) {
                     knowledgeMap.loadTagData();
                 }
+                
+                // Update start screen banner if visible
+                renderPendingReviewBanner();
                 
                 // Update badge
                 if (documentsCountBadge) documentsCountBadge.textContent = `${uploadedDocuments.length} files`;
@@ -2906,8 +3231,18 @@
                     detailHtml = `<p class="text-[10px] text-conflict/70 mt-0.5">${escapeHtml(errorMsg.substring(0, 50))}</p>`;
                 }
                 
+                // Pending review badge for completed documents
+                const isPendingReview = _pendingReviewDocs.some(p => p.id === doc.id);
+                const reviewBadgeHtml = (doc.status === 'completed' && isPendingReview) ? `
+                    <button onclick="startDocumentReview('${doc.id}', '${escapeHtml(doc.filename)}')"
+                        class="mt-1.5 w-full flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg bg-accent/10 border border-accent/20 hover:bg-accent/20 hover:border-accent/40 transition-all group">
+                        <span class="text-[10px]">🔍</span>
+                        <span class="text-[10px] text-accent font-medium group-hover:text-accent-bright">レビュー待ち — クリックで開始</span>
+                    </button>` : '';
+
                 // Tags for this document (will be loaded asynchronously)
                 const tagPlaceholder = doc.status === 'completed' ? `
+                    ${reviewBadgeHtml}
                     <div class="doc-tags flex flex-wrap gap-1 mt-1.5" data-doc-id="${doc.id}"></div>
                     <div class="flex gap-2 mt-2 pt-2 border-t border-white/5">
                         <button id="tag-btn-${doc.id}" onclick="refreshDocumentTags('${doc.id}')" class="flex-1 text-[10px] text-slate-400 hover:text-emerald-400 hover:bg-emerald-400/10 py-1 px-2 rounded transition-colors">
@@ -3278,6 +3613,7 @@
                 tagsData = await res.json();
                 renderTagCloud();
                 document.getElementById('tags-count-badge').textContent = `${tagsData.length} tags`;
+                updateMetrics();
             } catch (e) {
                 console.error('Error loading tags:', e);
             }

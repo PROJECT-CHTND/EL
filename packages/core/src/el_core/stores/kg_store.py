@@ -150,6 +150,7 @@ class KnowledgeGraphStore:
         domain: Domain | None = None,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
+        min_score: float = 0.5,
     ) -> list[KnowledgeItem]:
         """Search the knowledge graph for relevant insights.
 
@@ -162,6 +163,9 @@ class KnowledgeGraphStore:
             domain: Optional domain filter.
             start_date: Optional start date filter (filters by event_date).
             end_date: Optional end date filter (filters by event_date).
+            min_score: Minimum relevance score threshold (0.0-∞). Results
+                below this score are discarded to avoid pulling in unrelated
+                facts. Default 0.5.
 
         Returns:
             List of matching knowledge items.
@@ -175,13 +179,15 @@ class KnowledgeGraphStore:
             CALL db.index.fulltext.queryNodes('insight_search', $search_term)
             YIELD node, score
             WHERE node:Insight
+              AND score >= $min_score
+              AND coalesce(node.status, 'active') = 'active'
             """
             if domain:
                 ft_cypher += " AND node.domain = $domain_filter"
             if start_date:
-                ft_cypher += " AND (node.event_date IS NULL OR node.event_date >= $start_date)"
+                ft_cypher += " AND node.event_date >= $start_date"
             if end_date:
-                ft_cypher += " AND (node.event_date IS NULL OR node.event_date <= $end_date)"
+                ft_cypher += " AND node.event_date <= $end_date"
 
             ft_cypher += """
             MATCH (s:Entity)-[:SUBJECT_OF]->(node)-[:HAS_OBJECT]->(o:Entity)
@@ -195,7 +201,11 @@ class KnowledgeGraphStore:
             LIMIT $max_results
             """
 
-            params: dict[str, Any] = {"search_term": query, "max_results": limit}
+            params: dict[str, Any] = {
+                "search_term": query,
+                "max_results": limit,
+                "min_score": min_score,
+            }
             if domain:
                 params["domain_filter"] = domain.value
             if start_date:
@@ -253,22 +263,27 @@ class KnowledgeGraphStore:
         start_date: datetime | None = None,
         end_date: datetime | None = None,
     ) -> list[KnowledgeItem]:
-        """Basic search without full-text index."""
+        """Basic search without full-text index.
+
+        Uses CONTAINS matching on entity names and predicate.
+        Only returns ACTIVE facts (not SUPERSEDED or DISPUTED).
+        """
         cypher = """
         MATCH (s:Entity)-[:SUBJECT_OF]->(i:Insight)-[:HAS_OBJECT]->(o:Entity)
-        WHERE s.name CONTAINS $search_term 
+        WHERE (s.name CONTAINS $search_term 
            OR o.name CONTAINS $search_term 
-           OR i.predicate CONTAINS $search_term
+           OR i.predicate CONTAINS $search_term)
+          AND coalesce(i.status, 'active') = 'active'
         """
 
         if domain:
             cypher += " AND i.domain = $domain_filter"
         
         if start_date:
-            cypher += " AND (i.event_date IS NULL OR i.event_date >= $start_date)"
+            cypher += " AND i.event_date >= $start_date"
         
         if end_date:
-            cypher += " AND (i.event_date IS NULL OR i.event_date <= $end_date)"
+            cypher += " AND i.event_date <= $end_date"
 
         cypher += """
         RETURN 
@@ -1493,29 +1508,34 @@ class KnowledgeGraphStore:
                 processed_at=datetime.fromisoformat(node["processed_at"]) if node.get("processed_at") else None,
             )
 
-    async def get_documents(self, limit: int = 50) -> list[Document]:
-        """Get all documents.
+    async def get_documents(self, limit: int = 50) -> list[tuple[Document, str | None]]:
+        """Get all documents with their active review session ID.
 
         Args:
             limit: Maximum number of documents.
 
         Returns:
-            List of documents.
+            List of (document, review_session_id) tuples.
+            review_session_id is the ID of an active (non-ended) review session, or None.
         """
         cypher = """
         MATCH (d:Document)
-        RETURN d
+        OPTIONAL MATCH (s:Session)-[:REVIEWS_DOCUMENT]->(d)
+            WHERE s.status IS NULL OR s.status <> 'ended'
+        WITH d, s
         ORDER BY d.created_at DESC
         LIMIT $limit
+        RETURN d, s.id AS review_session_id
         """
 
-        documents: list[Document] = []
+        results: list[tuple[Document, str | None]] = []
 
         async with self.driver.session() as session:
             result = await session.run(cypher, limit=limit)
             async for record in result:
                 node = record["d"]
-                documents.append(Document(
+                review_session_id = record["review_session_id"]
+                doc = Document(
                     id=node["id"],
                     filename=node["filename"],
                     content_type=node["content_type"],
@@ -1531,9 +1551,10 @@ class KnowledgeGraphStore:
                     page_count=node.get("page_count", 1),
                     created_at=datetime.fromisoformat(node["created_at"]),
                     processed_at=datetime.fromisoformat(node["processed_at"]) if node.get("processed_at") else None,
-                ))
+                )
+                results.append((doc, review_session_id))
 
-        return documents
+        return results
 
     async def delete_document(self, document_id: str) -> bool:
         """Delete document and its linked facts.
@@ -1558,6 +1579,28 @@ class KnowledgeGraphStore:
             if deleted:
                 logger.info(f"Deleted document: {document_id}")
             return deleted
+
+    async def get_session_review_document_id(self, session_id: str) -> str | None:
+        """Get the document ID that a session is reviewing.
+        
+        Args:
+            session_id: Session ID.
+            
+        Returns:
+            Document ID if the session reviews a document, else None.
+        """
+        cypher = """
+        MATCH (s:Session {id: $session_id})-[:REVIEWS_DOCUMENT]->(d:Document)
+        RETURN d.id AS document_id
+        LIMIT 1
+        """
+        
+        async with self.driver.session() as session:
+            result = await session.run(cypher, session_id=session_id)
+            record = await result.single()
+            if record:
+                return record["document_id"]
+            return None
 
     async def link_session_to_document(self, session_id: str, document_id: str) -> None:
         """Link a session to a document for review purposes.
@@ -2584,7 +2627,10 @@ class KnowledgeGraphStore:
         Returns:
             List of matching knowledge items ordered by event_date.
         """
-        conditions = ["i.event_date IS NOT NULL"]
+        conditions = [
+            "i.event_date IS NOT NULL",
+            "coalesce(i.status, 'active') = 'active'",
+        ]
         params: dict[str, Any] = {"limit": limit}
 
         if start_date:

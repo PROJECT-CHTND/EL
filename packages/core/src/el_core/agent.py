@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Any
@@ -14,6 +15,7 @@ from el_core.schemas import (
     ConsistencyIssueKind,
     ConversationTurn,
     DateType,
+    Document,
     DocumentChunk,
     DocumentExtractionResult,
     Domain,
@@ -31,7 +33,7 @@ from el_core.schemas import (
     TopicSummary,
 )
 from el_core.stores.kg_store import KnowledgeGraphStore
-from el_core.tools import ALL_TOOLS, ToolExecutor
+from el_core.tools import ALL_TOOLS, SAVE_ONLY_TOOLS, ToolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -325,6 +327,8 @@ class ELAgent:
         self._llm = llm_client or LLMClient()
         self._kg_store = kg_store
         self._sessions: dict[str, Session] = {}
+        # Set to hold references to background tasks and prevent GC
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     async def start_session(
         self,
@@ -374,6 +378,28 @@ class ELAgent:
 
         # Generate natural opening response using LLM
         opening = await self._generate_opening_response(session, topic, detected_lang)
+
+        # Save the initial exchange (user topic + opening message) as the first conversation turn
+        # This ensures the user's initial input is preserved in conversation history
+        initial_turn = ConversationTurn(
+            user_message=topic,
+            assistant_response=opening,
+        )
+        session.add_turn(initial_turn)
+
+        # Persist the initial turn to Neo4j
+        if self._kg_store:
+            try:
+                await self._kg_store.save_conversation_turn(
+                    session_id=session_id,
+                    turn_index=0,
+                    user_message=topic,
+                    assistant_response=opening,
+                    timestamp=initial_turn.timestamp,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to save initial conversation turn: {e}")
+
         logger.info(f"Started session {session_id} for user {user_id} on topic: {topic}")
 
         return session_id, opening
@@ -424,20 +450,24 @@ class ELAgent:
                 "Your role is to deeply understand what people share and help them discover new insights.\n\n"
                 "Guidelines:\n"
                 "- Show genuine interest and empathy\n"
-                "- Keep responses conversational and warm\n"
+                "- Keep responses conversational and warm, but always polite\n"
                 "- Ask 1-2 open-ended questions to start the dialogue\n"
                 "- Be concise but engaging\n"
                 "- Do NOT output any JSON, tool calls, or code\n"
             )
         else:
             system_content = (
-                "あなたは「EL」です。好奇心旺盛で共感性の高いインタビュワーとして、"
-                "相手の話を深く理解し、新たな気づきを引き出す対話を行います。\n\n"
+                "あなたは「EL」です。知的好奇心が旺盛で、品のある丁寧な言葉遣いをするインタビュワーです。"
+                "相手の話に心から関心を持ち、深く理解しようとする姿勢で対話を行います。\n\n"
+                "話し方のルール（厳守）：\n"
+                "- 必ず「です・ます」調の丁寧語を使う（タメ口・くだけた口語は禁止）\n"
+                "- 上品で知的、かつ温かみのある話し方を心がける\n"
+                "- 「しよ」「っぽい」「だよね」「じゃん」のようなカジュアル表現は使わない\n"
+                "- 「〜なんですね」「〜でしょうか？」「〜いただけますか？」のような柔らかい敬体を使う\n\n"
                 "ガイドライン：\n"
-                "- 共感と関心を持って応答する\n"
-                "- 自然で温かい会話調を心がける\n"
-                "- 会話を始めるために1〜2個の質問をする\n"
-                "- 簡潔だけど魅力的に\n"
+                "- 共感と関心を丁寧に示す\n"
+                "- 会話を始めるために1つだけ質問をする\n"
+                "- 簡潔に、3〜4文以内で応答する\n"
                 "- JSONやツールコール、コードは絶対に出力しない\n"
             )
         
@@ -459,9 +489,9 @@ class ELAgent:
             system_content += (
                 "\n\n### 最初の応答に関する指示\n"
                 "これは新しい会話の開始です。ユーザーが話したいことを伝えてきました。"
-                "自然で温かく応答してください。ユーザーの入力を受け止め、関心を示し、"
-                "会話を始めるための適切なフォローアップの質問をしてください。"
-                "会話調でフレンドリーに、かつ簡潔に応答してください。"
+                "丁寧で温かく応答してください。ユーザーの入力を受け止め、関心を示し、"
+                "会話を始めるための適切なフォローアップの質問を1つしてください。"
+                "必ず「です・ます」調で、上品かつ簡潔に応答してください。"
                 "自然な会話テキストのみを出力してください。"
             )
         
@@ -621,6 +651,15 @@ class ELAgent:
         except Exception as e:
             logger.warning(f"Failed to restore pending questions: {e}")
 
+        # Check if this is a document review session and restore document_id
+        try:
+            review_doc_id = await self._kg_store.get_session_review_document_id(session_id)
+            if review_doc_id:
+                session.review_document_id = review_doc_id
+                logger.info(f"Restored review_document_id={review_doc_id} for session {session_id}")
+        except Exception as e:
+            logger.warning(f"Failed to restore review_document_id: {e}")
+
         # Store in active sessions
         self._sessions[session_id] = session
 
@@ -777,7 +816,7 @@ Example:
 
         try:
             import json
-            response = await self._llm.chat(messages=messages)  # type: ignore
+            response = await self._llm.chat(messages=messages, model=LLMClient.MODEL_MID)  # type: ignore
             content = response.content or "{}"
             
             # Clean up response
@@ -844,38 +883,68 @@ Example:
 
         from datetime import datetime
 
-        # ===== Step 1: Analyze answers to pending questions =====
+        # ===== Phase A: Analyze answers + Pre-search KG in parallel =====
         answered_question_ids: list[str] = []
         existing_pending = [q for q in session.pending_questions if q.status == QuestionStatus.PENDING]
 
-        if existing_pending:
-            answer_analyses = await self._analyze_answer_to_questions(
+        # Detect domain early so we can use it for filtering searches
+        detected_domain = self._detect_domain(user_message, [])
+        # Use session domain if current message domain is general (to maintain context)
+        search_domain = detected_domain if detected_domain != Domain.GENERAL else session.domain if session.domain != Domain.GENERAL else None
+
+        # Prepare parallel tasks for Phase A
+        answer_analysis_coro = (
+            self._analyze_answer_to_questions(
                 user_message=user_message,
                 pending_questions=existing_pending,
                 language=session.language,
             )
+            if existing_pending
+            else None
+        )
+        kg_search_coro = (
+            self._pre_search_knowledge(
+                user_message=user_message,
+                session=session,
+                search_domain=search_domain,
+            )
+            if self._kg_store
+            else None
+        )
 
-            # ===== Step 2: Apply answers to knowledge graph =====
+        # Run Phase A tasks in parallel
+        if answer_analysis_coro and kg_search_coro:
+            answer_analyses, kg_result = await asyncio.gather(
+                answer_analysis_coro, kg_search_coro
+            )
+        elif answer_analysis_coro:
+            answer_analyses = await answer_analysis_coro
+            kg_result = None
+        elif kg_search_coro:
+            answer_analyses = []
+            kg_result = await kg_search_coro
+        else:
+            answer_analyses = []
+            kg_result = None
+
+        # ===== Step 2: Apply answers to knowledge graph =====
+        if existing_pending and answer_analyses:
             pending_map = {q.id: q for q in existing_pending}
             for analysis in answer_analyses:
                 qid = analysis["question_id"]
                 pq = pending_map.get(qid)
                 if pq and analysis.get("answered"):
-                    # Update question status
                     pq.status = QuestionStatus.ANSWERED
                     pq.answer = analysis.get("new_value") or user_message
                     pq.answered_at = datetime.now()
                     answered_question_ids.append(qid)
-
-                    # Apply to knowledge graph
                     await self._apply_answer_to_knowledge(analysis, pq, session_id)
-
                     logger.info(f"Question {qid} answered: action={analysis.get('action')}")
                 elif pq and analysis.get("action") == "skip":
                     pq.status = QuestionStatus.SKIPPED
                     answered_question_ids.append(qid)
 
-        # ===== Step 3: Pre-search knowledge graph =====
+        # Unpack KG search results
         pre_search_knowledge: list[KnowledgeItem] = []
         consistency_issues: list[ConsistencyIssue] = []
         new_pending_questions: list[PendingQuestion] = []
@@ -883,63 +952,40 @@ Example:
         questions_context = ""
         chunk_context = ""
         relevant_chunks: list[DocumentChunk] = []
-        
+
+        if kg_result:
+            pre_search_knowledge = kg_result.get("knowledge", [])
+            relevant_chunks = kg_result.get("chunks", [])
+            chunk_context = kg_result.get("chunk_context", "")
+
+        # ===== Document Review Context: load reviewed document content =====
+        review_document_context = ""
+        if session.review_document_id and self._kg_store:
+            try:
+                doc_chunks = await self._kg_store.get_chunks_by_document(session.review_document_id)
+                if doc_chunks:
+                    # Include the full document content as authoritative context
+                    review_document_context = self._format_review_document_context(
+                        doc_chunks, session.language
+                    )
+                    logger.info(
+                        f"Loaded {len(doc_chunks)} chunks for review document "
+                        f"{session.review_document_id}"
+                    )
+                else:
+                    # Fallback: load document's raw content preview
+                    doc = await self._kg_store.get_document(session.review_document_id)
+                    if doc and doc.raw_content_preview:
+                        review_document_context = self._format_review_document_preview(
+                            doc, session.language
+                        )
+                        logger.info(f"Loaded document preview for review")
+            except Exception as e:
+                logger.warning(f"Failed to load review document context: {e}")
+
+        # ===== Phase B: Detect new questions (contradictions + missing info) =====
         if self._kg_store:
             try:
-                # Extract dates from user message for temporal filtering
-                start_date, end_date = extract_dates_from_text(user_message)
-                
-                # If a date is detected, save it to session for future reference
-                if start_date:
-                    if start_date not in session.referenced_dates:
-                        session.referenced_dates.append(start_date)
-                        logger.info(f"Added date to session context: {start_date}")
-                
-                # If no date in current message, use previously referenced dates
-                if not start_date and session.referenced_dates:
-                    start_date = session.referenced_dates[-1]
-                    end_date = start_date
-                    logger.info(f"Using previously referenced date: {start_date}")
-                
-                if start_date or end_date:
-                    logger.info(f"Detected date reference: {start_date} to {end_date}")
-                    
-                    if start_date and end_date and start_date == end_date:
-                        relevant_chunks = await self._kg_store.get_chunks_by_date(start_date)
-                    elif start_date and end_date:
-                        relevant_chunks = await self._kg_store.get_chunks_by_date_range(start_date, end_date)
-                    elif start_date:
-                        relevant_chunks = await self._kg_store.get_chunks_by_date(start_date)
-                    
-                    if relevant_chunks:
-                        chunk_context = self._format_chunk_context(relevant_chunks, session.language)
-                        logger.info(f"Found {len(relevant_chunks)} relevant chunks for date query")
-                        logger.info("Skipping fact search - using chunk original content as authoritative source")
-                    else:
-                        date_filtered_knowledge = await self._kg_store.search_by_date_range(
-                            start_date=start_date,
-                            end_date=end_date,
-                            query=user_message,
-                            limit=5,
-                        )
-                        pre_search_knowledge.extend(date_filtered_knowledge)
-                
-                if not relevant_chunks:
-                    keyword_knowledge = await self._kg_store.search(
-                        user_message,
-                        limit=5,
-                        start_date=start_date,
-                        end_date=end_date,
-                    )
-                    
-                    seen_ids = {k.id for k in pre_search_knowledge}
-                    for item in keyword_knowledge:
-                        if item.id not in seen_ids:
-                            pre_search_knowledge.append(item)
-                            seen_ids.add(item.id)
-
-                # ===== Step 4: Detect new questions (contradictions + missing info) =====
-                detected_domain = self._detect_domain(user_message, [])
                 new_pending_questions, consistency_issues = await self._generate_all_questions(
                     user_message=user_message,
                     knowledge_used=pre_search_knowledge,
@@ -949,7 +995,6 @@ Example:
                     session_id=session_id,
                 )
 
-                # If consistency issues found, add context for LLM
                 if consistency_issues:
                     consistency_context = self._format_consistency_context(
                         consistency_issues, session.language
@@ -981,6 +1026,10 @@ Example:
         if session.prior_context:
             system_content += session.prior_context
         
+        # Inject reviewed document content as primary context
+        if review_document_context:
+            system_content += review_document_context
+        
         if chunk_context:
             system_content += chunk_context
         
@@ -1005,13 +1054,28 @@ Example:
         messages.append({"role": "user", "content": user_message})
 
         # Set up tool executor with session_id for insight tracking
-        tool_executor = ToolExecutor(self._kg_store, session_id=session_id)
-        tool_executor.used_knowledge.extend(pre_search_knowledge)
+        tool_executor = ToolExecutor(
+            self._kg_store,
+            session_id=session_id,
+            session_domain=search_domain,
+        )
 
         # Call LLM with tools
+        # Only strip search_knowledge_graph when date-matched chunks exist (high confidence).
+        # Keyword-based pre_search_knowledge may include false positives, so keep ALL_TOOLS
+        # to let the LLM do its own targeted search when the injected context isn't relevant.
+        if chunk_context:
+            # Date-based chunk matches are high-confidence — no need for LLM to re-search
+            tools_to_use = SAVE_ONLY_TOOLS
+            tool_executor.used_knowledge.extend(pre_search_knowledge)
+        else:
+            # Keyword search results may be irrelevant; let LLM search if needed.
+            # pre_search_knowledge is still injected into the prompt as context
+            # but NOT tracked as "used" to avoid showing false positives in the UI.
+            tools_to_use = ALL_TOOLS
         response_text, tool_results = await self._llm.chat_with_tools(
             messages=messages,  # type: ignore
-            tools=ALL_TOOLS,
+            tools=tools_to_use,
             tool_handlers=tool_executor.get_tool_handlers(),
         )
 
@@ -1042,26 +1106,6 @@ Example:
         )
         session.add_turn(turn)
 
-        # Update session metadata in Neo4j
-        if self._kg_store:
-            try:
-                await self._save_session_metadata(session)
-            except Exception as e:
-                logger.warning(f"Failed to update session metadata: {e}")
-
-        # Save conversation turn to Neo4j for persistence
-        if self._kg_store:
-            try:
-                await self._kg_store.save_conversation_turn(
-                    session_id=session_id,
-                    turn_index=len(session.turns) - 1,
-                    user_message=user_message,
-                    assistant_response=response_text,
-                    timestamp=turn.timestamp,
-                )
-            except Exception as e:
-                logger.warning(f"Failed to save conversation turn: {e}")
-
         # Build tool calls list for response
         tool_calls = [
             {
@@ -1072,29 +1116,6 @@ Example:
             for tr in tool_results
         ]
 
-        # ===== Step 8: Persist questions to KG =====
-        if self._kg_store and new_pending_questions:
-            try:
-                await self._kg_store.save_pending_questions_batch(
-                    new_pending_questions, session_id
-                )
-            except Exception as e:
-                logger.warning(f"Failed to persist pending questions: {e}")
-
-        # Persist answered question status updates
-        if self._kg_store and answered_question_ids:
-            for qid in answered_question_ids:
-                try:
-                    pq = next((q for q in session.pending_questions if q.id == qid), None)
-                    if pq:
-                        await self._kg_store.update_question_status(
-                            question_id=qid,
-                            status=pq.status.value,
-                            answer=pq.answer,
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to update question {qid} status in KG: {e}")
-
         logger.info(
             f"Session {session_id}: processed message, "
             f"saved {len(tool_executor.saved_insights)} insights, "
@@ -1103,6 +1124,36 @@ Example:
             f"new questions {len(new_pending_questions)}, "
             f"answered {len(answered_question_ids)}"
         )
+
+        # ===== Offload KG persistence + tagging to background =====
+        if self._kg_store:
+            # Capture values needed by background task before returning
+            _saved_insight_ids = list(tool_executor.saved_insight_ids) if tool_executor.saved_insight_ids else []
+            _turn_index = len(session.turns) - 1
+            _turn_timestamp = turn.timestamp
+            _pending_question_statuses = []
+            if answered_question_ids:
+                for qid in answered_question_ids:
+                    pq = next((q for q in session.pending_questions if q.id == qid), None)
+                    if pq:
+                        _pending_question_statuses.append((qid, pq.status.value, pq.answer))
+
+            bg_task = asyncio.create_task(
+                self._post_respond_background(
+                    session=session,
+                    session_id=session_id,
+                    user_message=user_message,
+                    response_text=response_text,
+                    turn_index=_turn_index,
+                    turn_timestamp=_turn_timestamp,
+                    saved_insight_ids=_saved_insight_ids,
+                    new_pending_questions=new_pending_questions,
+                    pending_question_statuses=_pending_question_statuses,
+                )
+            )
+            # Hold a reference to prevent GC from collecting the task
+            self._background_tasks.add(bg_task)
+            bg_task.add_done_callback(self._background_tasks.discard)
 
         return AgentResponse(
             message=response_text,
@@ -1115,15 +1166,174 @@ Example:
             questions_answered=answered_question_ids,
         )
 
+    async def _post_respond_background(
+        self,
+        *,
+        session: Session,
+        session_id: str,
+        user_message: str,
+        response_text: str,
+        turn_index: int,
+        turn_timestamp: Any,
+        saved_insight_ids: list[tuple[str, str]],
+        new_pending_questions: list[PendingQuestion],
+        pending_question_statuses: list[tuple[str, str, str | None]],
+    ) -> None:
+        """Execute post-respond persistence and tagging in the background.
+
+        This runs as an asyncio.create_task after the response is returned
+        to the user, so it doesn't add latency to the user experience.
+        """
+        # 1. Save session metadata
+        try:
+            await self._save_session_metadata(session)
+        except Exception as e:
+            logger.warning(f"[BG] Failed to update session metadata: {e}")
+
+        # 2. Save conversation turn
+        try:
+            await self._kg_store.save_conversation_turn(  # type: ignore[union-attr]
+                session_id=session_id,
+                turn_index=turn_index,
+                user_message=user_message,
+                assistant_response=response_text,
+                timestamp=turn_timestamp,
+            )
+        except Exception as e:
+            logger.warning(f"[BG] Failed to save conversation turn: {e}")
+
+        # 3. Auto-tag saved insights
+        if saved_insight_ids:
+            try:
+                for insight_id, content in saved_insight_ids:
+                    try:
+                        await self.auto_tag_insight(
+                            insight_id=insight_id,
+                            content=content,
+                            max_tags=2,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[BG] Failed to auto-tag insight {insight_id}: {e}")
+
+                logger.info(
+                    f"[BG] Auto-tagged {len(saved_insight_ids)} conversation-derived insights"
+                )
+            except Exception as e:
+                logger.warning(f"[BG] Failed to auto-tag conversation insights: {e}")
+
+        # 4. Persist new pending questions
+        if new_pending_questions:
+            try:
+                await self._kg_store.save_pending_questions_batch(  # type: ignore[union-attr]
+                    new_pending_questions, session_id
+                )
+            except Exception as e:
+                logger.warning(f"[BG] Failed to persist pending questions: {e}")
+
+        # 5. Persist answered question status updates
+        for qid, status, answer in pending_question_statuses:
+            try:
+                await self._kg_store.update_question_status(  # type: ignore[union-attr]
+                    question_id=qid,
+                    status=status,
+                    answer=answer,
+                )
+            except Exception as e:
+                logger.warning(f"[BG] Failed to update question {qid} status in KG: {e}")
+
+        logger.info(f"[BG] Post-respond background tasks completed for session {session_id}")
+
+    async def _pre_search_knowledge(
+        self,
+        user_message: str,
+        session: Session,
+        search_domain: Domain | None,
+    ) -> dict[str, Any]:
+        """Pre-search the knowledge graph for relevant context.
+
+        Extracted from respond() to enable parallel execution with answer analysis.
+
+        Returns:
+            Dict with keys: knowledge (list[KnowledgeItem]), chunks (list[DocumentChunk]),
+            chunk_context (str).
+        """
+        pre_search_knowledge: list[KnowledgeItem] = []
+        relevant_chunks: list[DocumentChunk] = []
+        chunk_context = ""
+
+        try:
+            # Extract dates from user message for temporal filtering
+            start_date, end_date = extract_dates_from_text(user_message)
+
+            # If a date is detected, save it to session for future reference
+            if start_date:
+                if start_date not in session.referenced_dates:
+                    session.referenced_dates.append(start_date)
+                    logger.info(f"Added date to session context: {start_date}")
+
+            # If no date in current message, use previously referenced dates
+            if not start_date and session.referenced_dates:
+                start_date = session.referenced_dates[-1]
+                end_date = start_date
+                logger.info(f"Using previously referenced date: {start_date}")
+
+            if start_date or end_date:
+                logger.info(f"Detected date reference: {start_date} to {end_date}")
+
+                if start_date and end_date and start_date == end_date:
+                    relevant_chunks = await self._kg_store.get_chunks_by_date(start_date)  # type: ignore[union-attr]
+                elif start_date and end_date:
+                    relevant_chunks = await self._kg_store.get_chunks_by_date_range(start_date, end_date)  # type: ignore[union-attr]
+                elif start_date:
+                    relevant_chunks = await self._kg_store.get_chunks_by_date(start_date)  # type: ignore[union-attr]
+
+                if relevant_chunks:
+                    chunk_context = self._format_chunk_context(relevant_chunks, session.language)
+                    logger.info(f"Found {len(relevant_chunks)} relevant chunks for date query")
+                    logger.info("Skipping fact search - using chunk original content as authoritative source")
+                else:
+                    date_filtered_knowledge = await self._kg_store.search_by_date_range(  # type: ignore[union-attr]
+                        start_date=start_date,
+                        end_date=end_date,
+                        query=user_message,
+                        domain=search_domain,
+                        limit=5,
+                    )
+                    pre_search_knowledge.extend(date_filtered_knowledge)
+
+            if not relevant_chunks:
+                keyword_knowledge = await self._kg_store.search(  # type: ignore[union-attr]
+                    user_message,
+                    limit=5,
+                    domain=search_domain,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+
+                seen_ids = {k.id for k in pre_search_knowledge}
+                for item in keyword_knowledge:
+                    if item.id not in seen_ids:
+                        pre_search_knowledge.append(item)
+                        seen_ids.add(item.id)
+
+        except Exception as e:
+            logger.warning(f"Pre-search knowledge failed: {e}")
+
+        return {
+            "knowledge": pre_search_knowledge,
+            "chunks": relevant_chunks,
+            "chunk_context": chunk_context,
+        }
+
     def _format_knowledge_context(
         self,
         knowledge: list[KnowledgeItem],
         language: str,
     ) -> str:
-        """Format pre-searched knowledge items as context for LLM.
+        """Format pre-searched knowledge items as interviewing context for LLM.
 
-        Injects extracted facts from documents and prior sessions so the LLM
-        can directly reference them without needing to call a tool.
+        EL is an interviewer. These facts are provided so EL can form better,
+        more targeted questions — NOT to answer the user's questions directly.
 
         Args:
             knowledge: List of relevant knowledge items from pre-search.
@@ -1136,11 +1346,19 @@ Example:
             return ""
 
         if language.lower() in ("english", "en"):
-            context = "\n\n### 📚 Related Knowledge (from documents and prior sessions)\n"
-            context += "The following facts were found in the knowledge base. Use them to answer accurately.\n\n"
+            context = "\n\n### 📚 Known Facts (for forming better questions)\n"
+            context += "The following facts are already recorded in the knowledge base.\n"
+            context += "**Use these to ask deeper, more specific follow-up questions:**\n"
+            context += "- Reference these facts to explore contradictions, changes, or missing details\n"
+            context += "- Ask about the 'why' behind these facts, or probe for nuance\n"
+            context += "- Do NOT simply recite these facts back as answers\n\n"
         else:
-            context = "\n\n### 📚 関連する知識（ドキュメント・過去のセッションから抽出）\n"
-            context += "以下は知識ベースで見つかった関連ファクトです。回答の参考にしてください。\n\n"
+            context = "\n\n### 📚 記録済みファクト（より良い質問を形成するために使用）\n"
+            context += "以下は知識ベースに記録済みのファクトです。\n"
+            context += "**これらを元に、より深い質問を行ってください：**\n"
+            context += "- これらのファクトを参照して、矛盾・変化・不足している詳細を探る質問をする\n"
+            context += "- ファクトの背景や理由を深掘りする質問をする\n"
+            context += "- ファクトをそのまま回答として返すのではなく、質問の材料として活用する\n\n"
 
         for i, item in enumerate(knowledge, 1):
             date_str = ""
@@ -1149,7 +1367,7 @@ Example:
                 if item.event_date_end and item.event_date_end != item.event_date:
                     date_str += f"〜{item.event_date_end.strftime('%Y-%m-%d')}"
                 date_str += "]"
-            context += f"- **{item.subject}** {item.predicate} **{item.object}**{date_str} (信頼度: {item.confidence:.0%})\n"
+            context += f"- {item.subject} {item.predicate} {item.object}{date_str}\n"
 
         context += "\n"
         return context
@@ -1174,21 +1392,21 @@ Example:
             return ""
 
         if language.lower() in ("english", "en"):
-            context = "\n\n### 🔒 AUTHORITATIVE DOCUMENT CONTENT (Must Quote Exactly)\n"
-            context += "The following is the EXACT original content from the user's uploaded documents.\n"
-            context += "**CRITICAL RULES:**\n"
-            context += "1. Quote EXACTLY what is written - do not paraphrase or summarize\n"
-            context += "2. If document says 'カエル 前', say 'カエル 前' - NOT 'カエル（前/後）'\n"
-            context += "3. Do NOT add information that is not in the document\n"
-            context += "4. Do NOT guess or infer - only state what is explicitly written\n\n"
+            context = "\n\n### 📄 Document Content (Reference for Deeper Questions)\n"
+            context += "The following is content from the user's uploaded documents.\n"
+            context += "**Use this to form informed, specific questions:**\n"
+            context += "1. Reference specific details from the document to ask follow-up questions\n"
+            context += "2. If the document mentions something vague or incomplete, ask about it\n"
+            context += "3. Use document content to probe for context, reasons, or details behind the facts\n"
+            context += "4. When quoting the document, be accurate — do not paraphrase or alter the original text\n\n"
         else:
-            context = "\n\n### 🔒 ドキュメント原文（正確に引用すること）\n"
-            context += "以下はユーザーがアップロードしたドキュメントの**原文そのまま**です。\n"
-            context += "**絶対に守るべきルール：**\n"
-            context += "1. 書かれている内容を**一字一句そのまま**引用すること\n"
-            context += "2. 例：ドキュメントに「カエル 前」とあれば「カエル 前」と回答 - 「カエル（前/後）」は❌\n"
-            context += "3. ドキュメントに書かれていない情報を追加しないこと\n"
-            context += "4. 推測や補完は絶対にしないこと - 明示的に書かれていることのみ回答\n\n"
+            context = "\n\n### 📄 ドキュメント内容（より深い質問のための参照情報）\n"
+            context += "以下はユーザーがアップロードしたドキュメントの内容です。\n"
+            context += "**これを活用して、より具体的な質問を行ってください：**\n"
+            context += "1. ドキュメントの具体的な記述を引用しながら、深掘り質問をする\n"
+            context += "2. 曖昧・不完全な記載があれば、その詳細を質問する\n"
+            context += "3. ドキュメントの内容をもとに、背景・理由・経緯を探る質問をする\n"
+            context += "4. ドキュメントを引用する際は、原文を正確に引用すること\n\n"
 
         for chunk in chunks:
             # Add date header if available
@@ -1211,6 +1429,95 @@ Example:
         context += "---\n"
         context += "上記の原文から、質問に該当する部分をそのまま引用して回答してください。\n"
         
+        return context
+
+    def _format_review_document_context(
+        self,
+        chunks: list[DocumentChunk],
+        language: str,
+    ) -> str:
+        """Format the reviewed document's full content as context for LLM.
+
+        Unlike _format_chunk_context (which is for date-based search results),
+        this method provides the entire reviewed document as authoritative context
+        for document review sessions.
+
+        Args:
+            chunks: All chunks from the reviewed document.
+            language: Session language.
+
+        Returns:
+            Formatted context string to prepend to system prompt.
+        """
+        if not chunks:
+            return ""
+
+        if language.lower() in ("english", "en"):
+            context = "\n\n### 📋 Reviewed Document Content\n"
+            context += "You are reviewing the following document. "
+            context += "You have full access to its content — DO NOT ask the user to paste it.\n"
+            context += "Use this content to:\n"
+            context += "1. Answer questions about the document accurately\n"
+            context += "2. Reference specific details when discussing the document\n"
+            context += "3. Identify missing information or inconsistencies\n\n"
+        else:
+            context = "\n\n### 📋 レビュー対象ドキュメントの内容\n"
+            context += "あなたは以下のドキュメントをレビューしています。"
+            context += "ドキュメントの全文にアクセスできます。ユーザーに貼り付けを求めないでください。\n"
+            context += "このドキュメント内容を活用して：\n"
+            context += "1. ドキュメントに関する質問に正確に回答する\n"
+            context += "2. 議論する際にドキュメントの具体的な記述を引用する\n"
+            context += "3. 不足情報や矛盾を特定する\n\n"
+
+        for chunk in sorted(chunks, key=lambda c: c.chunk_index):
+            if chunk.chunk_date:
+                date_str = (
+                    chunk.chunk_date.strftime("%Y年%m月%d日")
+                    if language.lower() not in ("english", "en")
+                    else chunk.chunk_date.strftime("%Y-%m-%d")
+                )
+                context += f"---\n📅 {date_str}"
+                if chunk.heading:
+                    context += f" - {chunk.heading}"
+                context += "\n\n"
+            elif chunk.heading:
+                context += f"---\n📄 {chunk.heading}\n\n"
+
+            context += chunk.content
+            context += "\n\n"
+
+        context += "---\n"
+        return context
+
+    def _format_review_document_preview(
+        self,
+        doc: Document,
+        language: str,
+    ) -> str:
+        """Format a document's preview content as fallback context.
+
+        Used when chunks are not available but the document's raw preview exists.
+
+        Args:
+            doc: Document object with raw_content_preview.
+            language: Session language.
+
+        Returns:
+            Formatted context string.
+        """
+        if language.lower() in ("english", "en"):
+            context = "\n\n### 📋 Reviewed Document Preview\n"
+            context += f"Document: {doc.filename}\n"
+            context += "You have the following preview of the document content. "
+            context += "DO NOT ask the user to paste the document.\n\n"
+        else:
+            context = "\n\n### 📋 レビュー対象ドキュメントのプレビュー\n"
+            context += f"ドキュメント: {doc.filename}\n"
+            context += "以下はドキュメント内容のプレビューです。"
+            context += "ユーザーにドキュメントの貼り付けを求めないでください。\n\n"
+
+        context += doc.raw_content_preview
+        context += "\n\n---\n"
         return context
 
     def _format_consistency_context(
@@ -1483,11 +1790,21 @@ Example:
         if not knowledge_used:
             return []
 
-        # Build context for LLM to analyze, including fact_id for matching
-        knowledge_context = "\n".join([
-            f"- [ID:{item.id}] {item.subject}は{item.predicate} 「{item.object}」"
-            for item in knowledge_used
-        ])
+        # Build rich context for LLM including dates and source info
+        knowledge_lines = []
+        for item in knowledge_used:
+            line = f"- [ID:{item.id}] {item.subject}は{item.predicate}「{item.object}」"
+            # Add temporal context
+            if item.event_date:
+                date_str = item.event_date.strftime("%Y年%m月%d日")
+                if item.event_date_end:
+                    date_str += f"〜{item.event_date_end.strftime('%Y年%m月%d日')}"
+                line += f"（イベント日: {date_str}）"
+            # Add recording date for context
+            if item.created_at:
+                line += f"（記録日: {item.created_at.strftime('%Y年%m月%d日')}）"
+            knowledge_lines.append(line)
+        knowledge_context = "\n".join(knowledge_lines)
         
         # Create a lookup map for fact_id matching
         knowledge_map = {item.id: item for item in knowledge_used}
@@ -1500,20 +1817,22 @@ Example:
 - "change": Information has been updated/revised (e.g., deadline moved from date A to date B)
 
 Output ONLY valid JSON array. Each item should have:
-- kind: "contradiction" or "change" (use "contradiction" when both cannot be true simultaneously)
+- kind: "contradiction" or "change"
 - fact_id: The ID from the past record (e.g., "abc-123")
-- title: Brief title in 5 words or less
-- previous_text: What was recorded before
-- current_text: What user says now
-- suggested_question: Question to clarify
+- title: Brief descriptive title (e.g., "Exercise routine change")
+- previous_text: Full description of what was recorded before, including context (e.g., "On 1/14 (Wed), the recorded exercise routine was: back bends, planks, push-ups, twists, etc.")
+- current_text: Full description of what user says now, including context (e.g., "Today 1/4 (Sun), the exercise routine mentioned is: toe touches, forward bends, splits (left/right), frog (front), side plank (left/right)")
+- explanation: Detailed 2-3 sentence explanation of what exactly differs and why this matters. Explain the specific discrepancy clearly so the user can make an informed decision.
+- suggested_question: A specific, contextual question to help the user resolve this.
 
-If no issues found, output empty array: []
+**IMPORTANT**: previous_text and current_text should be descriptive full sentences with context, NOT just raw values. Include dates, subjects, and surrounding context so the user understands the full picture.
 
-Contradiction example:
-[{"kind":"contradiction","fact_id":"abc-123","title":"Different person responsible","previous_text":"Tanaka is responsible","current_text":"Yamada is responsible","suggested_question":"Previously Tanaka was mentioned as responsible. Has this changed to Yamada?"}]
+**CRITICAL - DO NOT flag these as issues:**
+- Records with DIFFERENT event dates that describe the same type of activity (e.g., exercise on Jan 4 vs exercise on Jan 14) are NOT contradictions — they are separate events on different days.
+- Diary/journal entries for different dates are independent records, not updates to each other.
+- Only flag as "change" or "contradiction" when two records describe the SAME event/date but with conflicting details.
 
-Change example:
-[{"kind":"change","fact_id":"abc-123","title":"Deadline moved","previous_text":"Deadline is March 31","current_text":"Deadline is February 28","suggested_question":"The deadline was March 31 before. Has it been moved to February 28?"}]"""
+If no issues found, output empty array: []"""
         else:
             system_prompt = """あなたは整合性チェッカーです。ユーザーの現在のメッセージが過去の記録と矛盾または変化しているか分析してください。
 
@@ -1522,20 +1841,22 @@ Change example:
 - "change"（変更）: 情報が更新・修正された（例：締め切りが日付Aから日付Bに変更）
 
 有効なJSON配列のみを出力してください。各項目には以下を含めます：
-- kind: "contradiction" または "change"（両方が同時に真であり得ない場合は "contradiction"）
+- kind: "contradiction" または "change"
 - fact_id: 過去の記録のID（例: "abc-123"）
-- title: 5語以内の簡潔なタイトル
-- previous_text: 以前記録されていた内容
-- current_text: 現在ユーザーが言っている内容
-- suggested_question: 確認のための質問
+- title: 内容が分かる簡潔なタイトル（例:「運動メニューの変更」「日記の日付の不一致」）
+- previous_text: 以前の記録の**詳細な説明**（日付・文脈を含む完全な文で記述。例:「1/14(水)の記録では、運動メニューは反り・プランク前後・腕立て・捻り等でした」）
+- current_text: 現在の情報の**詳細な説明**（日付・文脈を含む完全な文で記述。例:「今回1/4(日)の記録では、運動メニューは足先・前屈・開脚(左右)・カエル(前)・横プランク(左右)に変わっています」）
+- explanation: **具体的に何がどう異なるのか**を2〜3文で詳しく説明してください。ユーザーが判断できるよう、相違点を明確に述べてください。
+- suggested_question: ユーザーがこの問題を解決するための**具体的で文脈に即した質問**
 
-問題がない場合は空の配列を出力: []
+**重要**: previous_text と current_text は生の値だけでなく、日付・主語・文脈を含む説明的な完全文にしてください。ユーザーが前後の状況を理解できるようにしてください。
 
-矛盾の例:
-[{"kind":"contradiction","fact_id":"abc-123","title":"担当者が異なる","previous_text":"田中さんが担当","current_text":"山田さんが担当","suggested_question":"以前は田中さんが担当とのことでしたが、山田さんに変更になりましたか？"}]
+**絶対に矛盾として検出しないでください：**
+- イベント日（event_date）が異なる同種の活動の記録（例：1/4の運動メニューと1/14の運動メニュー）は矛盾ではありません。それぞれ別の日の独立した記録です。
+- 日記・日誌の異なる日付のエントリは独立した記録であり、互いの更新ではありません。
+- 「矛盾」や「変更」として検出するのは、**同じ日付・同じ出来事**について内容が食い違っている場合のみです。
 
-変更の例:
-[{"kind":"change","fact_id":"abc-123","title":"締め切り変更","previous_text":"締め切りは3月31日","current_text":"締め切りは2月28日","suggested_question":"以前は3月31日が締め切りでしたが、2月28日に変更になりましたか？"}]"""
+問題がない場合は空の配列を出力: []"""
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -1546,7 +1867,7 @@ Change example:
             import json
             from uuid import uuid4
             
-            response = await self._llm.chat(messages=messages)  # type: ignore
+            response = await self._llm.chat(messages=messages, model=LLMClient.MODEL_MID)  # type: ignore
             content = response.content or "[]"
             
             # Clean up response (remove markdown code blocks if present)
@@ -1572,6 +1893,15 @@ Change example:
                     if fact_id and fact_id not in knowledge_map:
                         fact_id = None  # Invalid ID, set to None
                     
+                    # Build source info from matched knowledge item
+                    previous_source = "過去の記録"
+                    if fact_id and fact_id in knowledge_map:
+                        matched = knowledge_map[fact_id]
+                        if matched.event_date:
+                            previous_source = f"過去の記録（{matched.event_date.strftime('%Y/%m/%d')}）"
+                        elif matched.created_at:
+                            previous_source = f"過去の記録（{matched.created_at.strftime('%Y/%m/%d')}記録）"
+                    
                     # Create issue with ID and session_id
                     issue = ConsistencyIssue(
                         id=str(uuid4()),
@@ -1579,10 +1909,11 @@ Change example:
                         title=item.get("title", "整合性チェック"),
                         fact_id=fact_id,
                         previous_text=item.get("previous_text", ""),
-                        previous_source="過去の記録",
+                        previous_source=previous_source,
                         current_text=item.get("current_text", ""),
                         current_source="現在の会話",
                         suggested_question=item.get("suggested_question", ""),
+                        explanation=item.get("explanation", ""),
                         confidence=0.7,
                         session_id=session_id,
                     )
@@ -1747,7 +2078,7 @@ Example:
             import json
             from datetime import datetime
 
-            response = await self._llm.chat(messages=messages)  # type: ignore
+            response = await self._llm.chat(messages=messages, model=LLMClient.MODEL_MID)  # type: ignore
             content = response.content or "[]"
 
             # Clean up response
@@ -1873,7 +2204,7 @@ Example:
         try:
             import json
 
-            response = await self._llm.chat(messages=messages)  # type: ignore
+            response = await self._llm.chat(messages=messages, model=LLMClient.MODEL_FAST)  # type: ignore
             content = response.content or "[]"
 
             # Clean up response
@@ -1968,8 +2299,14 @@ Example:
                     confidence=0.9,
                     domain=Domain.GENERAL,
                 )
-                await self._kg_store.save_insight(insight, session_id=session_id)
+                insight_id = await self._kg_store.save_insight(insight, session_id=session_id)
                 logger.info(f"Saved new insight from missing info answer: {new_value[:50]}")
+                # Auto-tag the insight
+                try:
+                    content = f"{insight.subject} {insight.predicate} {insight.object}"
+                    await self.auto_tag_insight(insight_id=insight_id, content=content, max_tags=2)
+                except Exception as e:
+                    logger.warning(f"Failed to auto-tag missing info insight: {e}")
 
             elif pending_question.kind == QuestionKind.CLARIFICATION and new_value:
                 # Save clarification as insight
@@ -1981,8 +2318,14 @@ Example:
                     confidence=0.85,
                     domain=Domain.GENERAL,
                 )
-                await self._kg_store.save_insight(insight, session_id=session_id)
+                insight_id = await self._kg_store.save_insight(insight, session_id=session_id)
                 logger.info(f"Saved clarification: {new_value[:50]}")
+                # Auto-tag the insight
+                try:
+                    content = f"{insight.subject} {insight.predicate} {insight.object}"
+                    await self.auto_tag_insight(insight_id=insight_id, content=content, max_tags=2)
+                except Exception as e:
+                    logger.warning(f"Failed to auto-tag clarification insight: {e}")
 
         except Exception as e:
             logger.warning(f"Failed to apply answer to knowledge: {e}")
@@ -2015,21 +2358,19 @@ Example:
         all_questions: list[PendingQuestion] = []
         consistency_issues: list[ConsistencyIssue] = []
 
-        # 1. Detect consistency issues (contradictions + changes)
-        if knowledge_used:
-            consistency_issues = await self._detect_consistency_issues(
+        # 1 + 2: Detect consistency issues AND missing information in parallel
+        consistency_coro = (
+            self._detect_consistency_issues(
                 user_message=user_message,
                 knowledge_used=knowledge_used,
                 language=language,
                 session_id=session_id,
             )
-            # Convert to PendingQuestion
-            for issue in consistency_issues:
-                pq = self._consistency_issue_to_pending_question(issue, session_id)
-                all_questions.append(pq)
+            if knowledge_used
+            else None
+        )
 
-        # 2. Detect missing information
-        missing_questions = await self._detect_missing_information(
+        missing_coro = self._detect_missing_information(
             extracted_facts=extracted_facts,
             user_message=user_message,
             existing_knowledge=knowledge_used,
@@ -2037,6 +2378,19 @@ Example:
             language=language,
             session_id=session_id,
         )
+
+        if consistency_coro:
+            consistency_issues, missing_questions = await asyncio.gather(
+                consistency_coro, missing_coro
+            )
+        else:
+            missing_questions = await missing_coro
+
+        # Convert consistency issues to PendingQuestion
+        for issue in consistency_issues:
+            pq = self._consistency_issue_to_pending_question(issue, session_id)
+            all_questions.append(pq)
+
         all_questions.extend(missing_questions)
 
         # Sort by priority (highest first)
@@ -2088,7 +2442,7 @@ Output ONLY valid JSON with these fields:
 - facts: Array of factual statements as objects with:
   - subject: The subject entity
   - predicate: The relationship/attribute
-  - object: The value/content
+  - object: The value/content (the SUBSTANTIVE content, NOT dates)
   - source_context: Brief context from document (max 50 chars)
   - event_date: Date when this event occurred (YYYY-MM-DD format, null if unknown)
   - event_date_end: End date for date ranges (YYYY-MM-DD format, null if not a range)
@@ -2097,14 +2451,20 @@ Output ONLY valid JSON with these fields:
 - entities: Array of mentioned people, organizations, projects, places
 - domain: One of "daily_work", "recipe", "postmortem", "creative", "general"
 
-IMPORTANT: Extract ALL date information carefully. For each fact:
-- If an exact date is mentioned (e.g., "May 1, 2024"), use date_type: "exact"
-- If approximate (e.g., "around May", "early 2024"), use date_type: "approximate"
-- If a range (e.g., "May 1-15"), use date_type: "range" and set event_date_end
-- If no date context, use date_type: "unknown"
+**CRITICAL RULES for dates:**
+- Dates should ALWAYS go in the event_date field, NOT in subject/predicate/object.
+- DO NOT create facts like "diary date is 1/4" or "entry date is Jan 14". The date is metadata, not content.
+- For diary/journal entries: extract WHAT HAPPENED on that date, and put the date in event_date.
+- Each date entry in a diary is an independent record. Different dates = different events, not updates.
 
-Example:
-{"summary":"Project status report showing 80% completion with deadline Feb 28, 2024.","facts":[{"subject":"Project A","predicate":"completion rate","object":"80%","source_context":"According to the report","event_date":"2024-01-15","event_date_end":null,"date_type":"exact"},{"subject":"Project A","predicate":"deadline","object":"Feb 28, 2024","source_context":"Confirmed in section 3","event_date":"2024-02-28","event_date_end":null,"date_type":"exact"}],"topics":["Project Management","Progress Report"],"entities":["Project A","Tanaka"],"domain":"daily_work"}"""
+**Date extraction rules:**
+- Exact date (e.g., "May 1, 2024") → date_type: "exact"
+- Approximate (e.g., "around May") → date_type: "approximate"
+- Range (e.g., "May 1-15") → date_type: "range", set event_date_end
+- No date context → date_type: "unknown"
+
+Example for a diary:
+{"summary":"Daily journal entries covering exercise routines and meals.","facts":[{"subject":"exercise routine","predicate":"included","object":"push-ups, planks, back bends, twists","source_context":"morning workout log","event_date":"2024-01-14","event_date_end":null,"date_type":"exact"},{"subject":"exercise routine","predicate":"included","object":"toe touches, splits, frog stretch, side planks","source_context":"morning workout log","event_date":"2024-01-04","event_date_end":null,"date_type":"exact"}],"topics":["Exercise","Health"],"entities":[],"domain":"daily_work"}"""
         else:
             system_prompt = """あなたはドキュメント分析者です。ドキュメントから重要な情報を抽出してください。特に日付・時間情報に注意を払ってください。
 
@@ -2113,7 +2473,7 @@ Example:
 - facts: 事実の配列（各項目は以下の形式）
   - subject: 主語エンティティ
   - predicate: 関係・属性
-  - object: 値・内容
+  - object: 値・内容（**実質的な内容**を記述。日付はここに入れない）
   - source_context: ドキュメントからの簡潔な文脈（最大50文字）
   - event_date: イベントが発生した日付（YYYY-MM-DD形式、不明ならnull）
   - event_date_end: 期間の終了日（YYYY-MM-DD形式、範囲でなければnull）
@@ -2122,14 +2482,20 @@ Example:
 - entities: 言及された人物、組織、プロジェクト、場所の配列
 - domain: "daily_work", "recipe", "postmortem", "creative", "general" のいずれか
 
-重要：すべての日付情報を注意深く抽出してください：
+**日付に関する重要なルール：**
+- 日付は必ず event_date フィールドに入れてください。subject/predicate/object には入れないでください。
+- 「日記は日付 1/4」「エントリの日付は1月14日」のような事実は絶対に作らないでください。日付はメタデータであり、事実の内容ではありません。
+- 日記・日誌の場合：**その日に何があったか**を事実として抽出し、日付は event_date に入れてください。
+- 日記の各日付エントリは独立した記録です。異なる日付 = 異なるイベントであり、同じ事実の更新ではありません。
+
+**日付の抽出ルール：**
 - 正確な日付がある場合（例：「2024年5月1日」）→ date_type: "exact"
 - 曖昧な日付の場合（例：「5月頃」「2024年初め」）→ date_type: "approximate"
 - 期間の場合（例：「5月1日〜15日」）→ date_type: "range"、event_date_endを設定
 - 日付の文脈がない場合 → date_type: "unknown"
 
-例:
-{"summary":"プロジェクト進捗レポート。完了率80%、締め切りは2024年2月28日。","facts":[{"subject":"プロジェクトA","predicate":"完了率","object":"80%","source_context":"レポートによると","event_date":"2024-01-15","event_date_end":null,"date_type":"exact"},{"subject":"プロジェクトA","predicate":"締め切り","object":"2024年2月28日","source_context":"セクション3で確認","event_date":"2024-02-28","event_date_end":null,"date_type":"exact"}],"topics":["プロジェクト管理","進捗報告"],"entities":["プロジェクトA","田中さん"],"domain":"daily_work"}"""
+日記の例:
+{"summary":"日々の運動メニューと食事の記録。","facts":[{"subject":"運動メニュー","predicate":"の内容","object":"反り・プランク前後・腕立て・捻り等","source_context":"朝の運動記録","event_date":"2024-01-14","event_date_end":null,"date_type":"exact"},{"subject":"運動メニュー","predicate":"の内容","object":"足先・前屈・開脚(左右)・カエル(前)・横プランク(左右)","source_context":"朝の運動記録","event_date":"2024-01-04","event_date_end":null,"date_type":"exact"},{"subject":"朝食","predicate":"のメニュー","object":"トースト、目玉焼き、サラダ","source_context":"食事の記録","event_date":"2024-01-14","event_date_end":null,"date_type":"exact"}],"topics":["運動","健康","食事"],"entities":[],"domain":"daily_work"}"""
 
         user_prompt = f"""ファイル名: {filename}
 
@@ -2146,7 +2512,20 @@ Example:
         result_content = ""
         try:
             import json
-            response = await self._llm.chat(messages=messages)  # type: ignore
+            # Use higher max_tokens for extraction: reasoning models need budget
+            # for both thinking tokens and output tokens
+            response = await self._llm.chat(
+                messages=messages,
+                model=LLMClient.MODEL_MID,
+                max_tokens=16384,
+            )  # type: ignore
+            
+            logger.info(
+                f"LLM extraction response for {filename}: "
+                f"content_length={len(response.content) if response.content else 'None'}, "
+                f"refusal={response.refusal if hasattr(response, 'refusal') else 'N/A'}"
+            )
+            
             result_content = response.content or "{}"
 
             # Clean up response
@@ -2318,8 +2697,19 @@ Example:
         )
         
         # Check each extracted fact against existing knowledge
+        # IMPORTANT: Exclude facts from the same document to avoid self-comparison
         consistency_issues: list[ConsistencyIssue] = []
         related_knowledge: list[KnowledgeItem] = []
+        
+        # Get IDs of facts from this document to exclude from comparison
+        same_doc_fact_ids: set[str] = set()
+        if self._kg_store:
+            try:
+                doc_insights = await self._kg_store.get_insights_for_document(document_id)
+                same_doc_fact_ids = {i.id for i in doc_insights if i.id}
+                logger.info(f"Excluding {len(same_doc_fact_ids)} facts from same document {document_id}")
+            except Exception as e:
+                logger.warning(f"Failed to get document facts for exclusion: {e}")
         
         if self._kg_store and extracted_facts:
             for fact in extracted_facts:
@@ -2327,28 +2717,36 @@ Example:
                 search_query = f"{fact.subject} {fact.predicate}"
                 related = await self._kg_store.search(
                     search_query,
-                    limit=5,
-                    start_date=fact.event_date,
-                    end_date=fact.event_date_end,
+                    limit=10,  # Fetch more since we'll filter some out
                 )
+                
+                # Filter out facts from the same document
+                related = [item for item in related if item.id not in same_doc_fact_ids]
+                
+                if not related:
+                    continue
+                
                 related_knowledge.extend(related)
                 
                 # Check for consistency issues
-                if related:
-                    fact_text = f"{fact.subject}は{fact.predicate}「{fact.object}」"
-                    issues = await self._detect_consistency_issues(
-                        user_message=fact_text,
-                        knowledge_used=related,
-                        language=detected_lang,
-                        session_id=session_id,
-                    )
-                    consistency_issues.extend(issues)
+                fact_text = f"{fact.subject}は{fact.predicate}「{fact.object}」"
+                if fact.event_date:
+                    fact_text += f"（{fact.event_date.strftime('%Y年%m月%d日')}の記録）"
+                
+                issues = await self._detect_consistency_issues(
+                    user_message=fact_text,
+                    knowledge_used=related,
+                    language=detected_lang,
+                    session_id=session_id,
+                )
+                consistency_issues.extend(issues)
         
         # Store related knowledge in session
         session.prior_knowledge = related_knowledge
         session.prior_context = self._format_prior_knowledge(related_knowledge, detected_lang)
         
-        # Store document_id in session metadata (we'll add a field for this)
+        # Store document_id in session for context loading during respond()
+        session.review_document_id = document_id
         self._sessions[session_id] = session
         
         # Save session metadata to Neo4j
@@ -2368,6 +2766,27 @@ Example:
             consistency_issues=consistency_issues,
             language=detected_lang,
         )
+
+        # Save the initial exchange as the first conversation turn
+        # This ensures the document review context is preserved in conversation history
+        initial_turn = ConversationTurn(
+            user_message=topic,
+            assistant_response=opening,
+        )
+        session.add_turn(initial_turn)
+
+        # Persist the initial turn to Neo4j
+        if self._kg_store:
+            try:
+                await self._kg_store.save_conversation_turn(
+                    session_id=session_id,
+                    turn_index=0,
+                    user_message=topic,
+                    assistant_response=opening,
+                    timestamp=initial_turn.timestamp,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to save initial conversation turn for review session: {e}")
         
         logger.info(
             f"Created document review session {session_id} for document {document_id}: "
@@ -2520,7 +2939,7 @@ Example:
 
         try:
             import json
-            response = await self._llm.chat(messages=messages)  # type: ignore
+            response = await self._llm.chat(messages=messages, model=LLMClient.MODEL_MID)  # type: ignore
             result_content = response.content or "{}"
 
             # Clean up response
@@ -2658,7 +3077,7 @@ Prioritize existing tags when appropriate, and suggest new ones if needed."""
         ]
 
         try:
-            response = await self._llm.chat(messages=messages)  # type: ignore
+            response = await self._llm.chat(messages=messages, model=LLMClient.MODEL_FAST)  # type: ignore
             result_content = response.content or "{}"
 
             # Clean up response
@@ -2802,7 +3221,7 @@ Is this new tag synonymous with any existing tag?"""
         ]
 
         try:
-            response = await self._llm.chat(messages=messages)  # type: ignore
+            response = await self._llm.chat(messages=messages, model=LLMClient.MODEL_FAST)  # type: ignore
             result_content = response.content or "{}"
 
             # Clean up response
@@ -3033,6 +3452,7 @@ Is this new tag synonymous with any existing tag?"""
         try:
             response = await self._llm.chat(
                 messages=[{"role": "user", "content": prompt}],
+                model=LLMClient.MODEL_FAST,
             )
 
             import json
