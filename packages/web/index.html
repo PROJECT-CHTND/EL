@@ -263,6 +263,17 @@
     <!-- Toast Container -->
     <div id="toast-container" class="fixed top-4 right-4 z-50 space-y-2 pointer-events-none"></div>
 
+    <!-- Session Loading Overlay -->
+    <div id="session-loading-overlay" class="fixed inset-0 z-40 bg-surface-0/80 backdrop-blur-sm flex items-center justify-center hidden transition-opacity duration-300 opacity-0">
+        <div class="flex flex-col items-center gap-3 p-6 rounded-2xl bg-surface-1 border border-white/10 shadow-2xl">
+            <svg class="animate-spin h-8 w-8 text-accent" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <span id="session-loading-text" class="text-sm text-slate-300">セッションを準備中...</span>
+        </div>
+    </div>
+
     <div class="h-screen flex flex-col">
         <!-- Header - minimal -->
         <header class="flex-none h-12 px-4 flex items-center justify-between border-b border-white/5">
@@ -290,6 +301,7 @@
                 <div class="flex-none p-3 border-b border-white/5">
                     <button 
                         id="new-session-btn"
+                        data-session-btn
                         class="w-full py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                         <span id="new-session-btn-text">+ 新しいセッション</span>
@@ -346,6 +358,7 @@
                             <button 
                                 type="submit"
                                 id="start-btn"
+                                data-session-btn
                                 class="w-full py-3 bg-accent hover:bg-accent-bright text-surface-0 font-medium rounded-lg transition-colors text-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                             >
                                 <span id="start-btn-text">開始</span>
@@ -1789,6 +1802,36 @@
         let isStarting = false;
         let isSending = false;
 
+        // ==================== Session Loading Overlay ====================
+        const sessionLoadingOverlay = document.getElementById('session-loading-overlay');
+        const sessionLoadingText = document.getElementById('session-loading-text');
+
+        function showSessionLoading(message = 'セッションを準備中...') {
+            sessionLoadingText.textContent = message;
+            sessionLoadingOverlay.classList.remove('hidden');
+            // Trigger reflow for transition
+            requestAnimationFrame(() => {
+                sessionLoadingOverlay.classList.remove('opacity-0');
+                sessionLoadingOverlay.classList.add('opacity-100');
+            });
+            // Disable all session-start buttons to prevent double-clicks
+            document.querySelectorAll('[data-session-btn]').forEach(btn => {
+                btn.disabled = true;
+                btn.classList.add('pointer-events-none', 'opacity-50');
+            });
+        }
+
+        function hideSessionLoading() {
+            sessionLoadingOverlay.classList.remove('opacity-100');
+            sessionLoadingOverlay.classList.add('opacity-0');
+            setTimeout(() => sessionLoadingOverlay.classList.add('hidden'), 300);
+            // Re-enable all session-start buttons
+            document.querySelectorAll('[data-session-btn]').forEach(btn => {
+                btn.disabled = false;
+                btn.classList.remove('pointer-events-none', 'opacity-50');
+            });
+        }
+
         // ==================== Sidebar Resize & Toggle ====================
         const leftPane = document.getElementById('left-pane');
         const rightPane = document.getElementById('right-pane');
@@ -2035,7 +2078,7 @@
                 const config = domainConfig[s.domain] || domainConfig['general'];
                 const status = s.has_conflicts ? 'conflict' : (s.verified_count > 0 ? 'verified' : 'draft');
                 return `
-                    <div class="session-item p-2.5 rounded-lg hover:bg-surface-2 cursor-pointer transition-colors" data-id="${s.id}">
+                    <div class="session-item p-2.5 rounded-lg hover:bg-surface-2 cursor-pointer transition-colors" data-id="${s.id}" data-session-btn>
                         <div class="flex items-center gap-2 mb-1">
                             <span class="text-xs">${config.emoji}</span>
                             <span class="text-sm text-white truncate flex-1">${escapeHtml(s.topic)}</span>
@@ -2075,7 +2118,7 @@
             startBtn.disabled = true;
             startBtnText.textContent = '開始中...';
             startBtnSpinner.classList.remove('hidden');
-            updateStatus('開始中...');
+            showSessionLoading('セッションを開始中...');
             
             try {
                 const res = await fetch(`${API_BASE}/api/sessions`, {
@@ -2113,6 +2156,7 @@
                 startBtn.disabled = false;
                 startBtnText.textContent = '開始';
                 startBtnSpinner.classList.add('hidden');
+                hideSessionLoading();
             }
         });
 
@@ -2120,7 +2164,7 @@
         async function resumeSession(id) {
             if (isStarting) return;
             isStarting = true;
-            updateStatus('読み込み中...');
+            showSessionLoading('セッションを読み込み中...');
             
             try {
                 const res = await fetch(`${API_BASE}/api/sessions/${id}/resume`, {
@@ -2171,6 +2215,7 @@
                 showToast('セッションの再開に失敗しました', 'error');
             } finally {
                 isStarting = false;
+                hideSessionLoading();
             }
         }
 
@@ -2879,7 +2924,7 @@
             }
 
             isStarting = true;
-            updateStatus('ドキュメントレビュー開始中...');
+            showSessionLoading(`「${filename}」のレビューを準備中...`);
 
             try {
                 const res = await fetch(`${API_BASE}/api/documents/${docId}/review`, {
@@ -2919,6 +2964,7 @@
                 showToast(`❌ ドキュメントレビューの開始に失敗しました`, 'error');
             } finally {
                 isStarting = false;
+                hideSessionLoading();
             }
         }
         // Expose for onclick in rendered HTML
@@ -2934,7 +2980,7 @@
                 const factsInfo = d.extracted_facts_count ? `${d.extracted_facts_count}件の事実を抽出` : '分析完了';
                 return `<div class="flex items-center justify-between gap-2 py-1">
                     <span class="text-xs text-slate-300 truncate">📄 ${escapeHtml(d.filename)}<span class="text-slate-500 ml-1">（${factsInfo}）</span></span>
-                    <button onclick="startDocumentReview('${d.id}', '${escapeHtml(d.filename)}')" 
+                    <button onclick="startDocumentReview('${d.id}', '${escapeHtml(d.filename)}')" data-session-btn
                         class="shrink-0 text-[10px] text-accent hover:text-accent-bright underline underline-offset-2">レビュー開始</button>
                 </div>`;
             }).join('');
@@ -2968,7 +3014,7 @@
             listEl.innerHTML = _pendingReviewDocs.map(d => {
                 const factsInfo = d.extracted_facts_count ? `${d.extracted_facts_count}件の事実` : '';
                 return `
-                    <button onclick="startDocumentReview('${d.id}', '${escapeHtml(d.filename)}')"
+                    <button onclick="startDocumentReview('${d.id}', '${escapeHtml(d.filename)}')" data-session-btn
                         class="w-full flex items-center gap-2 p-2 rounded-lg bg-surface-2 hover:bg-surface-3 border border-white/5 hover:border-accent/30 transition-all text-left group">
                         <span class="text-base">📄</span>
                         <div class="flex-1 min-w-0">
@@ -3234,7 +3280,7 @@
                 // Pending review badge for completed documents
                 const isPendingReview = _pendingReviewDocs.some(p => p.id === doc.id);
                 const reviewBadgeHtml = (doc.status === 'completed' && isPendingReview) ? `
-                    <button onclick="startDocumentReview('${doc.id}', '${escapeHtml(doc.filename)}')"
+                    <button onclick="startDocumentReview('${doc.id}', '${escapeHtml(doc.filename)}')" data-session-btn
                         class="mt-1.5 w-full flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg bg-accent/10 border border-accent/20 hover:bg-accent/20 hover:border-accent/40 transition-all group">
                         <span class="text-[10px]">🔍</span>
                         <span class="text-[10px] text-accent font-medium group-hover:text-accent-bright">レビュー待ち — クリックで開始</span>
