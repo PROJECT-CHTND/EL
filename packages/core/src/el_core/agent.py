@@ -953,10 +953,12 @@ Example:
         chunk_context = ""
         relevant_chunks: list[DocumentChunk] = []
 
+        search_entities: list[str] = []
         if kg_result:
             pre_search_knowledge = kg_result.get("knowledge", [])
             relevant_chunks = kg_result.get("chunks", [])
             chunk_context = kg_result.get("chunk_context", "")
+            search_entities = kg_result.get("search_entities", [])
 
         # ===== Document Review Context: load reviewed document content =====
         review_document_context = ""
@@ -993,6 +995,7 @@ Example:
                     domain=detected_domain,
                     language=session.language,
                     session_id=session_id,
+                    search_entities=search_entities,
                 )
 
                 if consistency_issues:
@@ -1254,11 +1257,13 @@ Example:
         questions_context = ""
         chunk_context = ""
         relevant_chunks: list[DocumentChunk] = []
+        search_entities: list[str] = []
 
         if kg_result:
             pre_search_knowledge = kg_result.get("knowledge", [])
             relevant_chunks = kg_result.get("chunks", [])
             chunk_context = kg_result.get("chunk_context", "")
+            search_entities = kg_result.get("search_entities", [])
 
         # Document review context
         review_document_context = ""
@@ -1286,6 +1291,7 @@ Example:
                     domain=detected_domain,
                     language=session.language,
                     session_id=session_id,
+                    search_entities=search_entities,
                 )
                 if consistency_issues:
                     consistency_context = self._format_consistency_context(consistency_issues, session.language)
@@ -1568,6 +1574,94 @@ Example:
 
         logger.info(f"[BG] Post-respond background tasks completed for session {session_id}")
 
+    # ==================== Improved KG Search ====================
+
+    async def _extract_search_queries(
+        self,
+        user_message: str,
+        language: str,
+    ) -> list[dict[str, Any]]:
+        """Extract structured search queries from a user message using LLM.
+
+        Instead of using the raw message as a search query, this method asks
+        a fast LLM to decompose the message into specific entity names and
+        keywords that are suitable for knowledge graph lookup.
+
+        Args:
+            user_message: The raw user message.
+            language: Session language.
+
+        Returns:
+            List of dicts with keys: entities (list[str]), keywords (list[str]).
+            Example: [
+                {"entities": ["田中", "プロジェクトA"], "keywords": ["進捗", "締め切り"]},
+            ]
+        """
+        import json
+
+        if language.lower() in ("english", "en"):
+            system_prompt = """Extract search terms from the user message for knowledge graph lookup.
+
+Output ONLY valid JSON with these keys:
+- entities: List of proper nouns, person names, project names, organization names, specific things mentioned (short, exact names only)
+- keywords: List of key concepts, topics, or relationship types mentioned (short phrases)
+
+Rules:
+- Entity names should be SHORT and EXACT (e.g., "田中" not "田中さん", "Project A" not "about Project A")
+- Remove particles, honorifics, and filler words
+- Include at most 5 entities and 3 keywords
+- If the message is a simple greeting or has no searchable content, return {"entities": [], "keywords": []}
+
+Example input: "I heard Tanaka mentioned the deadline for Project A was moved to next Friday"
+Example output: {"entities": ["Tanaka", "Project A"], "keywords": ["deadline"]}"""
+        else:
+            system_prompt = """ユーザーメッセージから知識グラフ検索用の検索語を抽出してください。
+
+以下のキーを持つ有効なJSONのみを出力してください：
+- entities: 固有名詞、人名、プロジェクト名、組織名、具体的な物事のリスト（短く正確な名前のみ）
+- keywords: 言及されている主要な概念、トピック、関係性のリスト（短いフレーズ）
+
+ルール：
+- エンティティ名は短く正確に（例：「田中さん」ではなく「田中」、「プロジェクトAについて」ではなく「プロジェクトA」）
+- 助詞、敬称、フィラーワードは除去する
+- エンティティは最大5つ、キーワードは最大3つまで
+- 挨拶や検索可能な内容がない場合は {"entities": [], "keywords": []} を返す
+
+入力例：「今日のミーティングで田中さんがプロジェクトAの締め切りが来週金曜に変更になったと言ってました」
+出力例：{"entities": ["田中", "プロジェクトA", "ミーティング"], "keywords": ["締め切り", "変更"]}"""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+
+        try:
+            response = await self._llm.chat(
+                messages=messages,
+                model=LLMClient.MODEL_FAST,
+                max_tokens=256,
+            )
+            content = (response.content or "{}").strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[-1]
+            if content.endswith("```"):
+                content = content.rsplit("```", 1)[0]
+            content = content.strip()
+
+            parsed = json.loads(content)
+            entities = parsed.get("entities", [])[:5]
+            keywords = parsed.get("keywords", [])[:3]
+
+            if entities or keywords:
+                logger.info(
+                    f"Extracted search queries - entities: {entities}, keywords: {keywords}"
+                )
+            return [{"entities": entities, "keywords": keywords}]
+
+        except Exception as e:
+            logger.warning(f"Query extraction failed, falling back to raw message: {e}")
+            return [{"entities": [], "keywords": []}]
+
     async def _pre_search_knowledge(
         self,
         user_message: str,
@@ -1576,32 +1670,37 @@ Example:
     ) -> dict[str, Any]:
         """Pre-search the knowledge graph for relevant context.
 
-        Extracted from respond() to enable parallel execution with answer analysis.
+        Uses a 3-stage search pipeline:
+        1. Date-based chunk retrieval (highest fidelity for temporal queries)
+        2. LLM-decomposed entity/keyword search (structured multi-entity lookup)
+        3. Neighborhood expansion (1-hop graph traversal for related facts)
+
+        Falls back to legacy raw-message search if LLM decomposition fails.
 
         Returns:
             Dict with keys: knowledge (list[KnowledgeItem]), chunks (list[DocumentChunk]),
-            chunk_context (str).
+            chunk_context (str), search_entities (list[str]).
         """
         pre_search_knowledge: list[KnowledgeItem] = []
         relevant_chunks: list[DocumentChunk] = []
         chunk_context = ""
+        search_entities: list[str] = []
 
         try:
-            # Extract dates from user message for temporal filtering
+            # Stage 0: Extract dates for temporal filtering
             start_date, end_date = extract_dates_from_text(user_message)
 
-            # If a date is detected, save it to session for future reference
             if start_date:
                 if start_date not in session.referenced_dates:
                     session.referenced_dates.append(start_date)
                     logger.info(f"Added date to session context: {start_date}")
 
-            # If no date in current message, use previously referenced dates
             if not start_date and session.referenced_dates:
                 start_date = session.referenced_dates[-1]
                 end_date = start_date
                 logger.info(f"Using previously referenced date: {start_date}")
 
+            # Stage 1: Date-based chunk retrieval (authoritative source)
             if start_date or end_date:
                 logger.info(f"Detected date reference: {start_date} to {end_date}")
 
@@ -1626,28 +1725,76 @@ Example:
                     )
                     pre_search_knowledge.extend(date_filtered_knowledge)
 
+            # Stage 2: LLM-decomposed entity/keyword search
             if not relevant_chunks:
-                keyword_knowledge = await self._kg_store.search(  # type: ignore[union-attr]
-                    user_message,
-                    limit=5,
-                    domain=search_domain,
-                    start_date=start_date,
-                    end_date=end_date,
-                )
+                query_data = await self._extract_search_queries(user_message, session.language)
+                entities = query_data[0].get("entities", []) if query_data else []
+                keywords = query_data[0].get("keywords", []) if query_data else []
+                search_entities = entities
 
-                seen_ids = {k.id for k in pre_search_knowledge}
-                for item in keyword_knowledge:
-                    if item.id not in seen_ids:
-                        pre_search_knowledge.append(item)
-                        seen_ids.add(item.id)
+                if entities or keywords:
+                    structured_results = await self._kg_store.search_by_entities(  # type: ignore[union-attr]
+                        entities=entities,
+                        keywords=keywords,
+                        limit_per_entity=5,
+                        total_limit=10,
+                        domain=search_domain,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+
+                    seen_ids = {k.id for k in pre_search_knowledge}
+                    for item in structured_results:
+                        if item.id not in seen_ids:
+                            pre_search_knowledge.append(item)
+                            seen_ids.add(item.id)
+
+                    logger.info(
+                        f"Structured search: {len(structured_results)} facts "
+                        f"from {len(entities)} entities + {len(keywords)} keywords"
+                    )
+
+                # Fallback: raw message search if structured search returned few results
+                if len(pre_search_knowledge) < 3:
+                    fallback_results = await self._kg_store.search(  # type: ignore[union-attr]
+                        user_message,
+                        limit=5,
+                        domain=search_domain,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                    seen_ids = {k.id for k in pre_search_knowledge}
+                    for item in fallback_results:
+                        if item.id not in seen_ids:
+                            pre_search_knowledge.append(item)
+                            seen_ids.add(item.id)
+
+                # Stage 3: Neighborhood expansion for richer context
+                if search_entities and self._kg_store and len(pre_search_knowledge) < 15:
+                    try:
+                        neighbor_facts = await self._kg_store.get_entity_neighborhood(
+                            entity_names=search_entities[:3],
+                            max_hops=1,
+                            limit=min(10, 15 - len(pre_search_knowledge)),
+                        )
+                        seen_ids = {k.id for k in pre_search_knowledge}
+                        for item in neighbor_facts:
+                            if item.id not in seen_ids:
+                                pre_search_knowledge.append(item)
+                                seen_ids.add(item.id)
+                    except Exception as e:
+                        logger.warning(f"Neighborhood expansion failed: {e}")
 
         except Exception as e:
             logger.warning(f"Pre-search knowledge failed: {e}")
+
+        logger.info(f"Pre-search total: {len(pre_search_knowledge)} facts, {len(relevant_chunks)} chunks")
 
         return {
             "knowledge": pre_search_knowledge,
             "chunks": relevant_chunks,
             "chunk_context": chunk_context,
+            "search_entities": search_entities,
         }
 
     def _format_knowledge_context(
@@ -2346,7 +2493,11 @@ Think about what information SHOULD exist but is missing. Consider:
 - If a decision is mentioned, do we know: reason, alternatives considered, who decided?
 - If a problem is mentioned, do we know: impact, root cause, resolution plan?
 
-Only suggest questions for GENUINELY USEFUL missing information. Don't ask trivial questions.
+**CRITICAL RULES:**
+1. **Do NOT ask about information already present in the existing knowledge section.** Check existing knowledge carefully before suggesting a question.
+2. **Do NOT ask about information the user just provided in their current message.** Don't echo back what the user already told you.
+3. Only suggest questions for GENUINELY USEFUL missing information. Don't ask trivial questions.
+4. Limit to at most 3 questions.
 
 Output ONLY valid JSON array. Each item should have:
 - kind: "missing" or "clarification"
@@ -2369,7 +2520,11 @@ Example:
 - 決定事項が言及されている場合：理由、検討した代替案、誰が決めたかはわかっているか？
 - 問題が言及されている場合：影響範囲、根本原因、解決計画はわかっているか？
 
-**本当に有用な**不足情報のみ質問してください。些末な質問は避けてください。
+**絶対に守るべきルール：**
+1. **既存の知識に既に含まれている情報は質問しない。** 既存の知識セクションを必ず確認し、既に回答がある情報を再度聞かないこと。
+2. **ユーザーメッセージから直接読み取れる情報は質問しない。** ユーザーが今まさに伝えている内容を質問として返さないこと。
+3. **本当に有用な**不足情報のみ質問してください。些末な質問は避けてください。
+4. 質問は最大3つまでに絞ること。
 
 有効なJSON配列のみを出力してください。各項目には以下を含めます：
 - kind: "missing" または "clarification"
@@ -2440,6 +2595,10 @@ Example:
                 except Exception as e:
                     logger.warning(f"Failed to parse missing info question: {e}")
                     continue
+
+            # Limit to top 3 by priority to avoid overwhelming the user
+            questions.sort(key=lambda q: q.priority, reverse=True)
+            questions = questions[:3]
 
             if questions:
                 logger.info(f"Detected {len(questions)} missing information questions")
@@ -2663,11 +2822,15 @@ Example:
         domain: Domain,
         language: str,
         session_id: str | None = None,
+        search_entities: list[str] | None = None,
     ) -> tuple[list[PendingQuestion], list[ConsistencyIssue]]:
         """Generate all questions (contradictions, changes, missing info) in a unified manner.
 
         Combines consistency issue detection and missing information detection,
         returning a unified list of PendingQuestion sorted by priority.
+
+        When search_entities are provided, fetches additional entity-specific facts
+        to give the consistency checker and missing info detector a richer context.
 
         Args:
             user_message: Current user message.
@@ -2676,6 +2839,7 @@ Example:
             domain: Detected domain.
             language: Session language.
             session_id: Session ID for persistence.
+            search_entities: Entity names extracted by LLM query decomposition.
 
         Returns:
             Tuple of (all PendingQuestions sorted by priority, raw ConsistencyIssues).
@@ -2683,22 +2847,41 @@ Example:
         all_questions: list[PendingQuestion] = []
         consistency_issues: list[ConsistencyIssue] = []
 
+        # Enrich knowledge context with entity-specific facts for better detection
+        enriched_knowledge = list(knowledge_used)
+        if search_entities and self._kg_store:
+            seen_ids = {k.id for k in enriched_knowledge}
+            for entity in search_entities[:3]:
+                try:
+                    entity_facts = await self._kg_store.get_related_insights(entity, limit=5)
+                    for fact in entity_facts:
+                        if fact.id not in seen_ids:
+                            enriched_knowledge.append(fact)
+                            seen_ids.add(fact.id)
+                except Exception as e:
+                    logger.warning(f"Failed to enrich facts for entity '{entity}': {e}")
+
+            if len(enriched_knowledge) > len(knowledge_used):
+                logger.info(
+                    f"Enriched knowledge context: {len(knowledge_used)} -> {len(enriched_knowledge)} facts"
+                )
+
         # 1 + 2: Detect consistency issues AND missing information in parallel
         consistency_coro = (
             self._detect_consistency_issues(
                 user_message=user_message,
-                knowledge_used=knowledge_used,
+                knowledge_used=enriched_knowledge,
                 language=language,
                 session_id=session_id,
             )
-            if knowledge_used
+            if enriched_knowledge
             else None
         )
 
         missing_coro = self._detect_missing_information(
             extracted_facts=extracted_facts,
             user_message=user_message,
-            existing_knowledge=knowledge_used,
+            existing_knowledge=enriched_knowledge,
             domain=domain,
             language=language,
             session_id=session_id,
