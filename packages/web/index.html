@@ -64,6 +64,31 @@
             30% { opacity: 1; }
         }
         
+        /* Streaming thinking phases */
+        .thinking-phase {
+            animation: phasePulse 2s ease-in-out infinite;
+        }
+        @keyframes phasePulse {
+            0%, 100% { opacity: 0.6; }
+            50% { opacity: 1; }
+        }
+        .phase-icon {
+            animation: phaseRotate 1.5s linear infinite;
+        }
+        @keyframes phaseRotate {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        .stream-cursor::after {
+            content: '|';
+            animation: cursorBlink 0.8s step-end infinite;
+            color: rgba(229, 168, 75, 0.8);
+        }
+        @keyframes cursorBlink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0; }
+        }
+        
         /* Custom scrollbar - minimal */
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
@@ -2349,10 +2374,10 @@
             sendBtn.disabled = true;
             updateStatus('処理中...');
             
-            const typingId = showTyping();
+            const streamId = createStreamingBubble();
             
             try {
-                const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/messages`, {
+                const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/messages/stream`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message: msg })
@@ -2360,56 +2385,94 @@
                 
                 if (!res.ok) throw new Error('API Error');
                 
-                const data = await res.json();
-                removeTyping(typingId);
-                
-                addMessage(data.response, 'assistant', data.knowledge_detail || []);
-                
-                // Handle insights
-                if (data.insights_saved > 0 && data.insights_detail) {
-                    data.insights_detail.forEach(i => addFact(i));
-                    if (knowledgeMap) knowledgeMap.onFactVerified(data.insights_saved);
-                    showToast(`${data.insights_saved}件の事実を記録`, 'success');
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let fullText = '';
+                let metadata = null;
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        let event;
+                        try { event = JSON.parse(line.slice(6)); } catch { continue; }
+
+                        switch (event.type) {
+                            case 'phase':
+                                updateStreamPhase(streamId, event.message || event.phase);
+                                break;
+                            case 'token':
+                                fullText += event.content;
+                                appendStreamToken(streamId, event.content);
+                                break;
+                            case 'tool_call':
+                                updateStreamPhase(streamId, `🔧 ${event.name} を実行中...`);
+                                break;
+                            case 'metadata':
+                                metadata = event;
+                                break;
+                            case 'error':
+                                showToast(event.message || 'エラーが発生しました', 'error');
+                                break;
+                            case 'done':
+                                break;
+                        }
+                    }
                 }
+
+                // Finalize the streaming bubble
+                const kd = metadata?.knowledge_detail || [];
+                finalizeStreamBubble(streamId, fullText || metadata?.response || '', kd);
                 
-                // Handle conflicts
-                if (data.consistency_issues?.length > 0) {
-                    data.consistency_issues.forEach(c => addConflict(c));
-                    if (knowledgeMap) knowledgeMap.onConflict();
-                }
-                
-                // Handle pending questions
-                if (data.pending_questions?.length > 0) {
-                    data.pending_questions.forEach(q => addPendingQuestion(q));
-                }
-                
-                // Handle answered questions - remove from pending
-                if (data.questions_answered?.length > 0) {
-                    data.questions_answered.forEach(qid => markQuestionAnswered(qid));
-                    showToast(`${data.questions_answered.length}件の質問に回答しました`, 'success');
-                }
-                
-                // Handle aggregation suggestion
-                if (data.aggregation_suggestion) {
-                    showAggregationSuggestion(data.aggregation_suggestion);
-                }
-                
-                // Handle suggested questions
-                if (data.suggested_questions?.length > 0) {
-                    document.getElementById('next-question-hint').textContent = 
-                        '💡 ' + data.suggested_questions[0];
+                // Handle metadata (insights, conflicts, questions, etc.)
+                if (metadata) {
+                    if (metadata.insights_saved > 0 && metadata.insights_detail) {
+                        metadata.insights_detail.forEach(i => addFact(i));
+                        if (knowledgeMap) knowledgeMap.onFactVerified(metadata.insights_saved);
+                        showToast(`${metadata.insights_saved}件の事実を記録`, 'success');
+                    }
+                    
+                    if (metadata.consistency_issues?.length > 0) {
+                        metadata.consistency_issues.forEach(c => addConflict(c));
+                        if (knowledgeMap) knowledgeMap.onConflict();
+                    }
+                    
+                    if (metadata.pending_questions?.length > 0) {
+                        metadata.pending_questions.forEach(q => addPendingQuestion(q));
+                    }
+                    
+                    if (metadata.questions_answered?.length > 0) {
+                        metadata.questions_answered.forEach(qid => markQuestionAnswered(qid));
+                        showToast(`${metadata.questions_answered.length}件の質問に回答しました`, 'success');
+                    }
+                    
+                    if (metadata.aggregation_suggestion) {
+                        showAggregationSuggestion(metadata.aggregation_suggestion);
+                    }
+                    
+                    if (metadata.suggested_questions?.length > 0) {
+                        document.getElementById('next-question-hint').textContent = 
+                            '💡 ' + metadata.suggested_questions[0];
+                    }
                 }
                 
                 updateMetrics();
-                loadKnowledgeStats(); // Update stats after each message
+                loadKnowledgeStats();
                 updateStatus('Collecting');
-                
-                // Show in-chat notice if documents are pending review
                 showDocumentReviewNoticeInChat();
                 
             } catch (err) {
                 console.error('Error sending message:', err);
-                removeTyping(typingId);
+                // Clean up the streaming bubble on error
+                const el = document.getElementById(streamId);
+                if (el) el.remove();
                 showToast('送信に失敗しました', 'error');
             } finally {
                 isSending = false;
@@ -2562,6 +2625,125 @@
 
         function removeTyping(id) {
             document.getElementById(id)?.remove();
+        }
+
+        // --- Streaming helpers ---
+        function createStreamingBubble() {
+            const wrapperId = 'stream-' + Date.now();
+            const div = document.createElement('div');
+            div.id = wrapperId;
+            div.className = 'flex justify-start fade-up';
+            
+            const container = document.createElement('div');
+            container.className = 'max-w-[75%]';
+
+            const phaseEl = document.createElement('div');
+            phaseEl.id = wrapperId + '-phase';
+            phaseEl.className = 'mb-1.5 flex items-center gap-2 text-[11px] text-slate-500 thinking-phase';
+            phaseEl.innerHTML = `<span class="phase-icon inline-block w-3 h-3 border border-slate-500 border-t-transparent rounded-full"></span><span class="phase-text">準備中...</span>`;
+            container.appendChild(phaseEl);
+
+            const bubble = document.createElement('div');
+            bubble.id = wrapperId + '-bubble';
+            bubble.className = 'px-4 py-2.5 rounded-2xl bg-surface-3 text-slate-200 text-sm prose-msg hidden';
+            container.appendChild(bubble);
+
+            const refSlot = document.createElement('div');
+            refSlot.id = wrapperId + '-refs';
+            container.appendChild(refSlot);
+
+            div.appendChild(container);
+            chatMessages.appendChild(div);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+            return wrapperId;
+        }
+
+        function updateStreamPhase(wrapperId, message) {
+            const phaseEl = document.getElementById(wrapperId + '-phase');
+            if (phaseEl) {
+                const textSpan = phaseEl.querySelector('.phase-text');
+                if (textSpan) textSpan.textContent = message;
+            }
+        }
+
+        function appendStreamToken(wrapperId, token) {
+            const bubble = document.getElementById(wrapperId + '-bubble');
+            if (!bubble) return;
+            if (bubble.classList.contains('hidden')) {
+                bubble.classList.remove('hidden');
+                // Hide phase indicator once text starts
+                const phaseEl = document.getElementById(wrapperId + '-phase');
+                if (phaseEl) phaseEl.classList.add('hidden');
+            }
+            // Accumulate raw text, re-render markdown periodically
+            if (!bubble._rawText) bubble._rawText = '';
+            bubble._rawText += token;
+            // Debounced markdown render
+            clearTimeout(bubble._renderTimer);
+            bubble._renderTimer = setTimeout(() => {
+                bubble.innerHTML = marked.parse(bubble._rawText);
+                bubble.classList.remove('stream-cursor');
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }, 80);
+            // Immediate: show raw text with cursor
+            bubble.textContent = bubble._rawText;
+            bubble.classList.add('stream-cursor');
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        function finalizeStreamBubble(wrapperId, fullText, knowledgeDetail) {
+            const phaseEl = document.getElementById(wrapperId + '-phase');
+            if (phaseEl) phaseEl.remove();
+
+            const bubble = document.getElementById(wrapperId + '-bubble');
+            if (bubble) {
+                clearTimeout(bubble._renderTimer);
+                bubble.classList.remove('hidden', 'stream-cursor');
+                bubble.innerHTML = marked.parse(fullText);
+            }
+
+            // Add referenced facts section
+            if (knowledgeDetail && knowledgeDetail.length > 0) {
+                const refSlot = document.getElementById(wrapperId + '-refs');
+                if (refSlot) {
+                    const refId = 'ref-' + Date.now();
+                    refSlot.className = 'mt-2 ml-1';
+                    refSlot.innerHTML = `
+                        <button 
+                            class="text-[10px] text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors"
+                            onclick="document.getElementById('${refId}').classList.toggle('hidden'); this.querySelector('.ref-arrow').textContent = document.getElementById('${refId}').classList.contains('hidden') ? '▶' : '▼';"
+                        >
+                            <span class="ref-arrow">▶</span>
+                            <span>📚 参照した事実 (${knowledgeDetail.length}件)</span>
+                        </button>
+                        <div id="${refId}" class="hidden mt-2 space-y-1.5 pl-2 border-l-2 border-blue-400/30">
+                            ${knowledgeDetail.map(k => {
+                                const subject = escapeHtml(k.subject || '');
+                                const predicate = escapeHtml(k.predicate || '');
+                                const obj = escapeHtml(k.object || '');
+                                const date = k.created_at ? new Date(k.created_at).toLocaleDateString('ja-JP') : '';
+                                return `
+                                    <div class="bg-surface-2/50 rounded-lg p-2 text-[10px]">
+                                        <div class="flex items-start gap-1.5">
+                                            <span class="text-blue-400 flex-none mt-0.5">•</span>
+                                            <div class="flex-1 min-w-0">
+                                                <div class="flex items-center gap-1 flex-wrap">
+                                                    <span class="text-slate-400 font-medium">${subject}</span>
+                                                    <span class="text-slate-500">→</span>
+                                                    <span class="text-slate-300">${predicate}</span>
+                                                </div>
+                                                <div class="text-white mt-0.5">${obj}</div>
+                                                ${date ? `<div class="text-slate-600 mt-1 text-[9px]">${date}</div>` : ''}
+                                            </div>
+                                        </div>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    `;
+                }
+            }
+            chatMessages.scrollTop = chatMessages.scrollHeight;
         }
 
         function addFact(fact) {

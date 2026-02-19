@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import AsyncIterator
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -202,6 +203,187 @@ class LLMClient:
             max_tokens=max_tokens,
         )
         return final_response.content or "", all_tool_results
+
+    async def chat_stream(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        *,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream chat completion tokens.
+
+        Yields content delta strings as they arrive from the API.
+        """
+        resolved_model = model or self._model
+        kwargs: dict[str, Any] = {
+            "model": resolved_model,
+            "messages": messages,
+            "max_completion_tokens": max_tokens,
+            "stream": True,
+        }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+
+        try:
+            stream = await self.client.chat.completions.create(**kwargs)
+            async for chunk in stream:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta and delta.content:
+                    yield delta.content
+        except Exception as e:
+            error_msg = str(e)
+            if "temperature" in error_msg.lower() and "unsupported" in error_msg.lower():
+                logger.warning("Temperature not supported by model, retrying without it (stream)")
+                kwargs.pop("temperature", None)
+                stream = await self.client.chat.completions.create(**kwargs)
+                async for chunk in stream:
+                    delta = chunk.choices[0].delta if chunk.choices else None
+                    if delta and delta.content:
+                        yield delta.content
+            else:
+                raise
+
+    async def chat_with_tools_stream(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        tools: list[ChatCompletionToolParam],
+        tool_handlers: dict[str, Any],
+        *,
+        model: str | None = None,
+        max_tool_rounds: int = 5,
+        max_tokens: int = 4096,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Chat with tools, streaming every response round.
+
+        Each round streams via the OpenAI API. If the model produces content
+        tokens they are yielded immediately. If it produces tool calls, those
+        are accumulated from the stream, executed, and the loop continues.
+
+        Yields dicts:
+            {"type": "tool_call", "name": ..., "arguments": ..., "result": ...}
+            {"type": "token", "content": "..."}
+            {"type": "tool_results", "results": [...]}   (emitted once at end)
+        """
+        import asyncio as _asyncio
+
+        current_messages = list(messages)
+        all_tool_results: list[dict[str, Any]] = []
+        resolved_model = model or self._model
+
+        for _round in range(max_tool_rounds + 1):
+            # Determine whether to provide tools
+            use_tools = _round < max_tool_rounds
+            kwargs: dict[str, Any] = {
+                "model": resolved_model,
+                "messages": current_messages,
+                "max_completion_tokens": max_tokens,
+                "stream": True,
+            }
+            if use_tools:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = "auto"
+
+            stream = await self.client.chat.completions.create(**kwargs)
+
+            # Accumulate streamed content and tool-call fragments
+            content_parts: list[str] = []
+            # tool_calls_acc: {index: {"id": ..., "name": ..., "arguments": ...}}
+            tool_calls_acc: dict[int, dict[str, str]] = {}
+
+            async for chunk in stream:
+                choice = chunk.choices[0] if chunk.choices else None
+                if not choice:
+                    continue
+                delta = choice.delta
+
+                # Content tokens — yield immediately
+                if delta.content:
+                    content_parts.append(delta.content)
+                    yield {"type": "token", "content": delta.content}
+
+                # Tool-call deltas — accumulate
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        if idx not in tool_calls_acc:
+                            tool_calls_acc[idx] = {"id": "", "name": "", "arguments": ""}
+                        if tc_delta.id:
+                            tool_calls_acc[idx]["id"] = tc_delta.id
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                tool_calls_acc[idx]["name"] = tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                tool_calls_acc[idx]["arguments"] += tc_delta.function.arguments
+
+            # If no tool calls were made, this was the final text round
+            if not tool_calls_acc:
+                yield {"type": "tool_results", "results": all_tool_results}
+                return
+
+            # Build assistant message with accumulated tool calls for the conversation
+            from openai.types.chat.chat_completion_message_tool_call import (
+                ChatCompletionMessageToolCall,
+                Function,
+            )
+            assembled_tool_calls = [
+                ChatCompletionMessageToolCall(
+                    id=tc["id"],
+                    type="function",
+                    function=Function(name=tc["name"], arguments=tc["arguments"]),
+                )
+                for tc in (tool_calls_acc[i] for i in sorted(tool_calls_acc))
+            ]
+            full_content = "".join(content_parts) or None
+            current_messages.append(
+                {"role": "assistant", "content": full_content, "tool_calls": assembled_tool_calls}  # type: ignore
+            )
+
+            # Execute each tool call
+            for tc_data in (tool_calls_acc[i] for i in sorted(tool_calls_acc)):
+                tool_name = tc_data["name"]
+                try:
+                    tool_args = json.loads(tc_data["arguments"])
+                except json.JSONDecodeError:
+                    tool_args = {}
+                logger.info(f"Executing tool: {tool_name} with args: {tool_args}")
+
+                if tool_name in tool_handlers:
+                    try:
+                        handler = tool_handlers[tool_name]
+                        if callable(handler):
+                            if _asyncio.iscoroutinefunction(handler):
+                                result = await handler(**tool_args)
+                            else:
+                                result = handler(**tool_args)
+                        else:
+                            result = {"error": f"Handler for {tool_name} is not callable"}
+                    except Exception as e:
+                        logger.error(f"Tool {tool_name} failed: {e}")
+                        result = {"error": str(e)}
+                else:
+                    result = {"error": f"Unknown tool: {tool_name}"}
+
+                tool_result = {
+                    "tool_call_id": tc_data["id"],
+                    "name": tool_name,
+                    "arguments": tool_args,
+                    "result": result,
+                }
+                all_tool_results.append(tool_result)
+                yield {"type": "tool_call", "name": tool_name, "arguments": tool_args, "result": result}
+
+                current_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc_data["id"],
+                        "content": json.dumps(result, ensure_ascii=False),
+                    }  # type: ignore
+                )
+
+        # Fell through all rounds
+        yield {"type": "tool_results", "results": all_tool_results}
 
     @staticmethod
     def create_tool_definition(

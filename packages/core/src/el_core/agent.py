@@ -1166,6 +1166,331 @@ Example:
             questions_answered=answered_question_ids,
         )
 
+    # ==================== Streaming respond ====================
+
+    async def respond_stream(
+        self,
+        session_id: str,
+        user_message: str,
+    ):
+        """Stream a response to a user message via SSE-friendly events.
+
+        Yields dicts with a "type" key:
+            {"type": "phase", "phase": "<name>", "message": "..."}
+            {"type": "token", "content": "..."}
+            {"type": "tool_call", "name": "...", "arguments": {...}}
+            {"type": "metadata", ...}   (insights, consistency, questions, etc.)
+            {"type": "done"}
+
+        The processing pipeline is identical to respond() so accuracy is preserved.
+        """
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise ValueError(f"Session {session_id} not found")
+
+        from collections.abc import AsyncIterator
+        from datetime import datetime
+
+        # --- Phase A: answer analysis + KG search (parallel) ---
+        yield {"type": "phase", "phase": "searching", "message": "知識ベースを検索中..."}
+
+        answered_question_ids: list[str] = []
+        existing_pending = [q for q in session.pending_questions if q.status == QuestionStatus.PENDING]
+        detected_domain = self._detect_domain(user_message, [])
+        search_domain = detected_domain if detected_domain != Domain.GENERAL else session.domain if session.domain != Domain.GENERAL else None
+
+        answer_analysis_coro = (
+            self._analyze_answer_to_questions(
+                user_message=user_message,
+                pending_questions=existing_pending,
+                language=session.language,
+            )
+            if existing_pending
+            else None
+        )
+        kg_search_coro = (
+            self._pre_search_knowledge(
+                user_message=user_message,
+                session=session,
+                search_domain=search_domain,
+            )
+            if self._kg_store
+            else None
+        )
+
+        if answer_analysis_coro and kg_search_coro:
+            answer_analyses, kg_result = await asyncio.gather(answer_analysis_coro, kg_search_coro)
+        elif answer_analysis_coro:
+            answer_analyses = await answer_analysis_coro
+            kg_result = None
+        elif kg_search_coro:
+            answer_analyses = []
+            kg_result = await kg_search_coro
+        else:
+            answer_analyses = []
+            kg_result = None
+
+        # Apply answers
+        if existing_pending and answer_analyses:
+            pending_map = {q.id: q for q in existing_pending}
+            for analysis in answer_analyses:
+                qid = analysis["question_id"]
+                pq = pending_map.get(qid)
+                if pq and analysis.get("answered"):
+                    pq.status = QuestionStatus.ANSWERED
+                    pq.answer = analysis.get("new_value") or user_message
+                    pq.answered_at = datetime.now()
+                    answered_question_ids.append(qid)
+                    await self._apply_answer_to_knowledge(analysis, pq, session_id)
+                elif pq and analysis.get("action") == "skip":
+                    pq.status = QuestionStatus.SKIPPED
+                    answered_question_ids.append(qid)
+
+        # Unpack KG results
+        pre_search_knowledge: list[KnowledgeItem] = []
+        consistency_issues: list[ConsistencyIssue] = []
+        new_pending_questions: list[PendingQuestion] = []
+        consistency_context = ""
+        questions_context = ""
+        chunk_context = ""
+        relevant_chunks: list[DocumentChunk] = []
+
+        if kg_result:
+            pre_search_knowledge = kg_result.get("knowledge", [])
+            relevant_chunks = kg_result.get("chunks", [])
+            chunk_context = kg_result.get("chunk_context", "")
+
+        # Document review context
+        review_document_context = ""
+        if session.review_document_id and self._kg_store:
+            try:
+                doc_chunks = await self._kg_store.get_chunks_by_document(session.review_document_id)
+                if doc_chunks:
+                    review_document_context = self._format_review_document_context(doc_chunks, session.language)
+                else:
+                    doc = await self._kg_store.get_document(session.review_document_id)
+                    if doc and doc.raw_content_preview:
+                        review_document_context = self._format_review_document_preview(doc, session.language)
+            except Exception as e:
+                logger.warning(f"Failed to load review document context: {e}")
+
+        # --- Phase B: consistency / missing info detection ---
+        yield {"type": "phase", "phase": "analyzing", "message": "整合性を分析中..."}
+
+        if self._kg_store:
+            try:
+                new_pending_questions, consistency_issues = await self._generate_all_questions(
+                    user_message=user_message,
+                    knowledge_used=pre_search_knowledge,
+                    extracted_facts=None,
+                    domain=detected_domain,
+                    language=session.language,
+                    session_id=session_id,
+                )
+                if consistency_issues:
+                    consistency_context = self._format_consistency_context(consistency_issues, session.language)
+            except Exception as e:
+                logger.warning(f"Pre-search for consistency failed: {e}")
+
+        # Build questions context
+        still_pending = [q for q in session.pending_questions if q.status == QuestionStatus.PENDING]
+        all_active_questions = still_pending + new_pending_questions
+        seen_question_texts: set[str] = set()
+        deduped_questions: list[PendingQuestion] = []
+        for q in sorted(all_active_questions, key=lambda x: x.priority, reverse=True):
+            if q.question not in seen_question_texts:
+                deduped_questions.append(q)
+                seen_question_texts.add(q.question)
+        all_active_questions = deduped_questions
+
+        if all_active_questions:
+            questions_context = self._format_questions_context(all_active_questions, session.language)
+
+        # --- Phase C: build messages & stream LLM response ---
+        yield {"type": "phase", "phase": "generating", "message": "回答を生成中..."}
+
+        system_content = get_system_prompt(session.language)
+        if session.prior_context:
+            system_content += session.prior_context
+        if review_document_context:
+            system_content += review_document_context
+        if chunk_context:
+            system_content += chunk_context
+        if pre_search_knowledge:
+            knowledge_context = self._format_knowledge_context(pre_search_knowledge, session.language)
+            system_content += knowledge_context
+        if consistency_context:
+            system_content += consistency_context
+        if questions_context:
+            system_content += questions_context
+
+        messages: list[dict[str, Any]] = [{"role": "system", "content": system_content}]
+        messages.extend(session.message_history)
+        messages.append({"role": "user", "content": user_message})
+
+        tool_executor = ToolExecutor(self._kg_store, session_id=session_id, session_domain=search_domain)
+
+        if chunk_context:
+            tools_to_use = SAVE_ONLY_TOOLS
+            tool_executor.used_knowledge.extend(pre_search_knowledge)
+        else:
+            tools_to_use = ALL_TOOLS
+
+        # Stream tokens from LLM
+        full_response_text = ""
+        all_tool_results: list[dict[str, Any]] = []
+
+        async for event in self._llm.chat_with_tools_stream(
+            messages=messages,  # type: ignore
+            tools=tools_to_use,
+            tool_handlers=tool_executor.get_tool_handlers(),
+        ):
+            if event["type"] == "token":
+                full_response_text += event["content"]
+                yield {"type": "token", "content": event["content"]}
+            elif event["type"] == "tool_call":
+                yield {"type": "tool_call", "name": event["name"], "arguments": event.get("arguments", {})}
+            elif event["type"] == "tool_results":
+                all_tool_results = event["results"]
+
+        response_text = full_response_text
+        detected_domain = self._detect_domain(user_message, all_tool_results)
+
+        # --- Update session state (same as respond()) ---
+        questions_asked_ids: list[str] = []
+        for q in new_pending_questions:
+            q.asked_at = datetime.now()
+            questions_asked_ids.append(q.id)
+
+        session.pending_questions = list(session.pending_questions) + new_pending_questions
+
+        turn = ConversationTurn(
+            user_message=user_message,
+            assistant_response=response_text,
+            insights_saved=tool_executor.saved_insights,
+            knowledge_used=tool_executor.used_knowledge,
+            detected_domain=detected_domain,
+            questions_asked=questions_asked_ids,
+            questions_answered=answered_question_ids,
+        )
+        session.add_turn(turn)
+
+        tool_calls = [
+            {"id": tr.get("tool_call_id", ""), "name": tr.get("name", ""), "arguments": tr.get("arguments", {})}
+            for tr in all_tool_results
+        ]
+
+        logger.info(
+            f"Session {session_id}: streamed message, "
+            f"saved {len(tool_executor.saved_insights)} insights, "
+            f"used {len(tool_executor.used_knowledge)} knowledge items"
+        )
+
+        # Background persistence
+        if self._kg_store:
+            _saved_insight_ids = list(tool_executor.saved_insight_ids) if tool_executor.saved_insight_ids else []
+            _turn_index = len(session.turns) - 1
+            _turn_timestamp = turn.timestamp
+            _pending_question_statuses = []
+            if answered_question_ids:
+                for qid in answered_question_ids:
+                    pq = next((q for q in session.pending_questions if q.id == qid), None)
+                    if pq:
+                        _pending_question_statuses.append((qid, pq.status.value, pq.answer))
+
+            bg_task = asyncio.create_task(
+                self._post_respond_background(
+                    session=session,
+                    session_id=session_id,
+                    user_message=user_message,
+                    response_text=response_text,
+                    turn_index=_turn_index,
+                    turn_timestamp=_turn_timestamp,
+                    saved_insight_ids=_saved_insight_ids,
+                    new_pending_questions=new_pending_questions,
+                    pending_question_statuses=_pending_question_statuses,
+                )
+            )
+            self._background_tasks.add(bg_task)
+            bg_task.add_done_callback(self._background_tasks.discard)
+
+        # Emit final metadata
+        insights_detail = [
+            {
+                "subject": i.subject,
+                "predicate": i.predicate,
+                "object": i.object,
+                "domain": i.domain.value,
+                "confidence": i.confidence,
+            }
+            for i in tool_executor.saved_insights
+        ]
+        knowledge_detail = [
+            {
+                "subject": k.subject,
+                "predicate": k.predicate,
+                "object": k.object,
+                "domain": k.domain.value,
+                "created_at": k.created_at.isoformat(),
+            }
+            for k in tool_executor.used_knowledge
+        ]
+        consistency_detail = [
+            {
+                "id": c.id,
+                "kind": c.kind.value,
+                "status": c.status.value,
+                "title": c.title,
+                "fact_id": c.fact_id,
+                "previous_text": c.previous_text,
+                "previous_source": c.previous_source,
+                "current_text": c.current_text,
+                "current_source": c.current_source,
+                "suggested_question": c.suggested_question,
+                "explanation": c.explanation,
+                "confidence": c.confidence,
+                "resolution": c.resolution,
+                "resolved_at": c.resolved_at.isoformat() if c.resolved_at else None,
+                "session_id": c.session_id,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+            }
+            for c in consistency_issues
+        ]
+        pending_questions_detail = [
+            {
+                "id": q.id,
+                "kind": q.kind.value,
+                "question": q.question,
+                "context": q.context,
+                "related_fact_id": q.related_fact_id,
+                "related_entity": q.related_entity,
+                "priority": q.priority,
+                "status": q.status.value,
+                "answer": q.answer,
+                "session_id": q.session_id,
+                "asked_at": q.asked_at.isoformat() if q.asked_at else None,
+                "answered_at": q.answered_at.isoformat() if q.answered_at else None,
+                "created_at": q.created_at.isoformat() if q.created_at else None,
+            }
+            for q in all_active_questions
+            if q.status == QuestionStatus.PENDING
+        ]
+
+        yield {
+            "type": "metadata",
+            "response": response_text,
+            "detected_domain": detected_domain.value,
+            "insights_saved": len(tool_executor.saved_insights),
+            "insights_detail": insights_detail,
+            "knowledge_used": len(tool_executor.used_knowledge),
+            "knowledge_detail": knowledge_detail,
+            "consistency_issues": consistency_detail,
+            "pending_questions": pending_questions_detail,
+            "questions_answered": answered_question_ids,
+        }
+
+        yield {"type": "done"}
+
     async def _post_respond_background(
         self,
         *,
