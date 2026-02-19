@@ -12,10 +12,10 @@ from typing import Any
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, File, UploadFile, BackgroundTasks
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, File, UploadFile, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from el_core import ELAgent
@@ -417,6 +417,37 @@ async def send_message(session_id: str, request: MessageRequest) -> MessageRespo
         pending_questions=pending_questions_detail,
         questions_answered=response.questions_answered,
         aggregation_suggestion=aggregation_suggestion,
+    )
+
+
+@app.post("/api/sessions/{session_id}/messages/stream")
+async def send_message_stream(session_id: str, request: MessageRequest) -> StreamingResponse:
+    """Send a message and stream the response via SSE."""
+    import json as _json
+
+    if agent is None:
+        raise HTTPException(status_code=503, detail="Agent not initialized")
+
+    session = agent.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    async def event_generator():
+        try:
+            async for event in agent.respond_stream(session_id, request.message):
+                yield f"data: {_json.dumps(event, ensure_ascii=False, default=str)}\n\n"
+        except Exception as e:
+            logger.error(f"Streaming error: {e}")
+            yield f"data: {_json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
