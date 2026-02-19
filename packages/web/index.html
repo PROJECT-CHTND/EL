@@ -136,6 +136,22 @@
             transform: scale(1);
         }
         
+        /* Documents Modal */
+        #documents-modal {
+            opacity: 0;
+            transition: opacity 0.25s ease;
+        }
+        #documents-modal.visible {
+            opacity: 1;
+        }
+        #documents-modal #docs-modal-content {
+            transform: scale(0.92) translateY(12px);
+            transition: transform 0.25s ease;
+        }
+        #documents-modal.visible #docs-modal-content {
+            transform: scale(1) translateY(0);
+        }
+        
         /* Topic chip */
         .topic-chip {
             transition: background 0.15s, border-color 0.15s;
@@ -435,7 +451,9 @@
                 <div class="flex-none p-4 border-b border-white/5">
                     <div class="flex items-center justify-between mb-2">
                         <h3 class="text-xs font-medium text-blue-400 uppercase tracking-wider">📄 Documents</h3>
-                        <span id="documents-count-badge-top" class="text-[10px] text-slate-500">0 files</span>
+                        <button id="open-documents-modal-btn" onclick="openDocumentsModal()" class="text-[10px] text-slate-500 hover:text-blue-400 hover:bg-white/5 px-2 py-0.5 rounded transition-colors">
+                            <span id="documents-count-badge-top">0 files</span> ▸
+                        </button>
                     </div>
                     <div 
                         id="upload-dropzone-main"
@@ -445,7 +463,12 @@
                         <p class="text-xs text-slate-400">📁 ファイルをドロップまたはクリック</p>
                         <p class="text-[10px] text-slate-600 mt-1">PDF, DOCX, XLSX, TXT, MD, JSON</p>
                     </div>
-                    <div id="documents-list-main" class="space-y-2 max-h-48 overflow-y-auto"
+                    <!-- Compact preview: show up to 2 docs, click for full list -->
+                    <div id="documents-list-main" class="space-y-1.5"></div>
+                    <div id="documents-list-compact-hint" class="hidden">
+                        <button onclick="openDocumentsModal()" class="w-full mt-1.5 text-[10px] text-slate-500 hover:text-blue-400 py-1.5 rounded-lg hover:bg-white/5 transition-colors text-center">
+                            すべてのドキュメントを表示…
+                        </button>
                     </div>
                 </div>
 
@@ -571,6 +594,37 @@
                         <span id="km-modal-conflicts" class="text-lg font-semibold text-conflict">0</span>
                         <span class="text-[10px] text-slate-400 ml-1">矛盾</span>
                     </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Documents List Modal -->
+    <div id="documents-modal" class="fixed inset-0 z-50 hidden">
+        <div id="docs-modal-backdrop" class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
+        <div class="absolute inset-0 flex items-center justify-center p-8 pointer-events-none">
+            <div id="docs-modal-content" class="relative bg-surface-1 rounded-2xl border border-white/10 shadow-2xl pointer-events-auto flex flex-col"
+                 style="width: 560px; max-width: 90vw; max-height: 80vh;">
+                <div class="flex items-center justify-between px-5 py-4 border-b border-white/5 flex-none">
+                    <div class="flex items-center gap-3">
+                        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">📄 Documents</h2>
+                        <span id="docs-modal-count" class="text-[10px] text-slate-500 bg-surface-3 px-2 py-0.5 rounded-full">0 files</span>
+                    </div>
+                    <button id="docs-modal-close" onclick="closeDocumentsModal()" class="text-slate-500 hover:text-white transition-colors p-1 rounded-lg hover:bg-white/10">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                    </button>
+                </div>
+                <div class="px-5 py-3 border-b border-white/5 flex-none">
+                    <div 
+                        id="upload-dropzone-modal"
+                        class="border-2 border-dashed border-white/10 rounded-lg p-3 text-center hover:border-blue-400/50 hover:bg-blue-400/5 transition-colors cursor-pointer"
+                    >
+                        <input type="file" id="file-input-modal" class="hidden" accept=".pdf,.docx,.xlsx,.txt,.md,.json" multiple>
+                        <p class="text-xs text-slate-400">📁 ファイルをドロップまたはクリック</p>
+                        <p class="text-[10px] text-slate-600 mt-1">PDF, DOCX, XLSX, TXT, MD, JSON</p>
+                    </div>
+                </div>
+                <div id="documents-list-modal" class="flex-1 overflow-y-auto p-4 space-y-2">
                 </div>
             </div>
         </div>
@@ -2031,7 +2085,53 @@
             if (e.key === 'Escape' && !kmModal.classList.contains('hidden')) {
                 closeKnowledgeMapModal();
             }
+            if (e.key === 'Escape' && !docsModal.classList.contains('hidden')) {
+                closeDocumentsModal();
+            }
         });
+
+        // Documents Modal
+        const docsModal = document.getElementById('documents-modal');
+        const docsModalBackdrop = document.getElementById('docs-modal-backdrop');
+        const docsModalList = document.getElementById('documents-list-modal');
+        const docsModalCount = document.getElementById('docs-modal-count');
+
+        function openDocumentsModal() {
+            docsModalCount.textContent = `${uploadedDocuments.length} files`;
+            renderDocumentsInModal();
+            docsModal.classList.remove('hidden');
+            docsModal.offsetHeight;
+            docsModal.classList.add('visible');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeDocumentsModal() {
+            docsModal.classList.remove('visible');
+            setTimeout(() => {
+                docsModal.classList.add('hidden');
+                document.body.style.overflow = '';
+            }, 250);
+        }
+
+        docsModalBackdrop.addEventListener('click', closeDocumentsModal);
+
+        // Modal upload dropzone
+        const uploadDropzoneModal = document.getElementById('upload-dropzone-modal');
+        const fileInputModal = document.getElementById('file-input-modal');
+        if (uploadDropzoneModal && fileInputModal) {
+            uploadDropzoneModal.addEventListener('click', () => fileInputModal.click());
+            uploadDropzoneModal.addEventListener('dragover', (e) => { e.preventDefault(); uploadDropzoneModal.classList.add('border-blue-400/50', 'bg-blue-400/5'); });
+            uploadDropzoneModal.addEventListener('dragleave', () => { uploadDropzoneModal.classList.remove('border-blue-400/50', 'bg-blue-400/5'); });
+            uploadDropzoneModal.addEventListener('drop', (e) => {
+                e.preventDefault();
+                uploadDropzoneModal.classList.remove('border-blue-400/50', 'bg-blue-400/5');
+                if (e.dataTransfer.files.length > 0) handleFileUpload(e.dataTransfer.files);
+            });
+            fileInputModal.addEventListener('change', (e) => {
+                if (e.target.files.length > 0) handleFileUpload(e.target.files);
+                e.target.value = '';
+            });
+        }
 
         // Domain config (simplified)
         const domainConfig = {
@@ -3229,104 +3329,141 @@
             }
         }
 
+        function buildDocCardHtml(doc, compact = false) {
+            const statusConfig = {
+                'completed': { icon: '✅', color: 'text-verified', label: '完了' },
+                'processing': { icon: '⏳', color: 'text-amber-400', label: '分析中...' },
+                'uploading': { icon: '📤', color: 'text-blue-400', label: 'アップロード中' },
+                'failed': { icon: '❌', color: 'text-conflict', label: 'エラー' },
+            };
+            const status = statusConfig[doc.status] || statusConfig['uploading'];
+
+            if (compact) {
+                return `
+                    <div class="p-1.5 bg-surface-2 rounded text-xs border border-white/5 hover:border-white/10 transition-colors cursor-pointer" onclick="openDocumentsModal()">
+                        <div class="flex items-center gap-2">
+                            <span class="${status.color} text-xs">${status.icon}</span>
+                            <p class="text-white truncate text-[11px] flex-1 min-w-0">${escapeHtml(doc.filename)}</p>
+                            <span class="text-[9px] ${status.color} whitespace-nowrap">${status.label}</span>
+                        </div>
+                    </div>`;
+            }
+
+            let detailHtml = '';
+            if (doc.status === 'completed') {
+                const parts = [];
+                if (doc.extracted_facts_count > 0) {
+                    parts.push(`<span class="text-verified">${doc.extracted_facts_count} facts</span>`);
+                }
+                if (doc.topics?.length > 0) {
+                    parts.push(`<span class="text-blue-400">${doc.topics.slice(0, 2).join(', ')}</span>`);
+                }
+                if (doc.domain && doc.domain !== 'general') {
+                    parts.push(`<span class="text-purple-400">${doc.domain}</span>`);
+                }
+                detailHtml = parts.length > 0 
+                    ? `<p class="text-[10px] text-slate-500 mt-0.5">${parts.join(' · ')}</p>` 
+                    : '';
+                
+                if (doc.extracted_summary) {
+                    const summaryPreview = doc.extracted_summary.length > 60 
+                        ? doc.extracted_summary.substring(0, 60) + '...' 
+                        : doc.extracted_summary;
+                    detailHtml += `<p class="text-[9px] text-slate-600 mt-1 italic">"${escapeHtml(summaryPreview)}"</p>`;
+                }
+            } else if (doc.status === 'processing') {
+                detailHtml = `<p class="text-[10px] text-amber-400/70 mt-0.5 animate-pulse">LLMで内容を分析しています...</p>`;
+            } else if (doc.status === 'failed') {
+                const errorMsg = doc.error_message || '処理に失敗しました';
+                detailHtml = `<p class="text-[10px] text-conflict/70 mt-0.5">${escapeHtml(errorMsg.substring(0, 50))}</p>`;
+            }
+            
+            const isPendingReview = _pendingReviewDocs.some(p => p.id === doc.id);
+            const reviewBadgeHtml = (doc.status === 'completed' && isPendingReview) ? `
+                <button onclick="startDocumentReview('${doc.id}', '${escapeHtml(doc.filename)}')" data-session-btn
+                    class="mt-1.5 w-full flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg bg-accent/10 border border-accent/20 hover:bg-accent/20 hover:border-accent/40 transition-all group">
+                    <span class="text-[10px]">🔍</span>
+                    <span class="text-[10px] text-accent font-medium group-hover:text-accent-bright">レビュー待ち — クリックで開始</span>
+                </button>` : '';
+
+            const tagPlaceholder = doc.status === 'completed' ? `
+                ${reviewBadgeHtml}
+                <div class="doc-tags flex flex-wrap gap-1 mt-1.5" data-doc-id="${doc.id}"></div>
+                <div class="flex gap-2 mt-2 pt-2 border-t border-white/5">
+                    <button id="tag-btn-${doc.id}" onclick="refreshDocumentTags('${doc.id}')" class="flex-1 text-[10px] text-slate-400 hover:text-emerald-400 hover:bg-emerald-400/10 py-1 px-2 rounded transition-colors">
+                        🏷️ タグ再生成
+                    </button>
+                    <button id="extract-btn-${doc.id}" onclick="extractDocumentFacts('${doc.id}')" class="flex-1 text-[10px] text-slate-400 hover:text-purple-400 hover:bg-purple-400/10 py-1 px-2 rounded transition-colors">
+                        📊 Facts抽出
+                    </button>
+                </div>` : '';
+            
+            return `
+                <div class="p-2 bg-surface-2 rounded text-xs border border-white/5 hover:border-white/10 transition-colors">
+                    <div class="flex items-start gap-2">
+                        <span class="${status.color} text-sm">${status.icon}</span>
+                        <div class="flex-1 min-w-0">
+                            <div class="flex items-center justify-between gap-1">
+                                <p class="text-white truncate font-medium">${escapeHtml(doc.filename)}</p>
+                                <span class="text-[9px] ${status.color} whitespace-nowrap">${status.label}</span>
+                            </div>
+                            ${detailHtml}
+                            ${tagPlaceholder}
+                        </div>
+                        <button onclick="deleteDocument('${doc.id}')" class="text-slate-500 hover:text-conflict text-xs ml-1 opacity-50 hover:opacity-100">×</button>
+                    </div>
+                </div>`;
+        }
+
         function renderDocuments() {
             const emptyMessage = '<p class="text-[10px] text-slate-600 text-center py-2">ドキュメントがありません</p>';
+            const compactHint = document.getElementById('documents-list-compact-hint');
             
             if (uploadedDocuments.length === 0) {
                 if (documentsList) documentsList.innerHTML = emptyMessage;
+                if (compactHint) compactHint.classList.add('hidden');
                 return;
             }
 
-            const docHtml = uploadedDocuments.map(doc => {
-                const statusConfig = {
-                    'completed': { icon: '✅', color: 'text-verified', label: '完了' },
-                    'processing': { icon: '⏳', color: 'text-amber-400', label: '分析中...' },
-                    'uploading': { icon: '📤', color: 'text-blue-400', label: 'アップロード中' },
-                    'failed': { icon: '❌', color: 'text-conflict', label: 'エラー' },
-                };
-                const status = statusConfig[doc.status] || statusConfig['uploading'];
-                
-                // Build detail section for completed documents
-                let detailHtml = '';
-                if (doc.status === 'completed') {
-                    const parts = [];
-                    if (doc.extracted_facts_count > 0) {
-                        parts.push(`<span class="text-verified">${doc.extracted_facts_count} facts</span>`);
-                    }
-                    if (doc.topics?.length > 0) {
-                        parts.push(`<span class="text-blue-400">${doc.topics.slice(0, 2).join(', ')}</span>`);
-                    }
-                    if (doc.domain && doc.domain !== 'general') {
-                        parts.push(`<span class="text-purple-400">${doc.domain}</span>`);
-                    }
-                    detailHtml = parts.length > 0 
-                        ? `<p class="text-[10px] text-slate-500 mt-0.5">${parts.join(' · ')}</p>` 
-                        : '';
-                    
-                    // Show summary preview if available
-                    if (doc.extracted_summary) {
-                        const summaryPreview = doc.extracted_summary.length > 60 
-                            ? doc.extracted_summary.substring(0, 60) + '...' 
-                            : doc.extracted_summary;
-                        detailHtml += `<p class="text-[9px] text-slate-600 mt-1 italic">"${escapeHtml(summaryPreview)}"</p>`;
-                    }
-                } else if (doc.status === 'processing') {
-                    detailHtml = `<p class="text-[10px] text-amber-400/70 mt-0.5 animate-pulse">LLMで内容を分析しています...</p>`;
-                } else if (doc.status === 'failed') {
-                    const errorMsg = doc.error_message || '処理に失敗しました';
-                    detailHtml = `<p class="text-[10px] text-conflict/70 mt-0.5">${escapeHtml(errorMsg.substring(0, 50))}</p>`;
-                }
-                
-                // Pending review badge for completed documents
-                const isPendingReview = _pendingReviewDocs.some(p => p.id === doc.id);
-                const reviewBadgeHtml = (doc.status === 'completed' && isPendingReview) ? `
-                    <button onclick="startDocumentReview('${doc.id}', '${escapeHtml(doc.filename)}')" data-session-btn
-                        class="mt-1.5 w-full flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg bg-accent/10 border border-accent/20 hover:bg-accent/20 hover:border-accent/40 transition-all group">
-                        <span class="text-[10px]">🔍</span>
-                        <span class="text-[10px] text-accent font-medium group-hover:text-accent-bright">レビュー待ち — クリックで開始</span>
-                    </button>` : '';
+            const COMPACT_MAX = 2;
+            const compactDocs = uploadedDocuments.slice(0, COMPACT_MAX);
+            const compactHtml = compactDocs.map(doc => buildDocCardHtml(doc, true)).join('');
+            if (documentsList) documentsList.innerHTML = compactHtml;
 
-                // Tags for this document (will be loaded asynchronously)
-                const tagPlaceholder = doc.status === 'completed' ? `
-                    ${reviewBadgeHtml}
-                    <div class="doc-tags flex flex-wrap gap-1 mt-1.5" data-doc-id="${doc.id}"></div>
-                    <div class="flex gap-2 mt-2 pt-2 border-t border-white/5">
-                        <button id="tag-btn-${doc.id}" onclick="refreshDocumentTags('${doc.id}')" class="flex-1 text-[10px] text-slate-400 hover:text-emerald-400 hover:bg-emerald-400/10 py-1 px-2 rounded transition-colors">
-                            🏷️ タグ再生成
-                        </button>
-                        <button id="extract-btn-${doc.id}" onclick="extractDocumentFacts('${doc.id}')" class="flex-1 text-[10px] text-slate-400 hover:text-purple-400 hover:bg-purple-400/10 py-1 px-2 rounded transition-colors">
-                            📊 Facts抽出
-                        </button>
-                    </div>` : '';
-                
-                return `
-                    <div class="p-2 bg-surface-2 rounded text-xs border border-white/5 hover:border-white/10 transition-colors">
-                        <div class="flex items-start gap-2">
-                            <span class="${status.color} text-sm">${status.icon}</span>
-                            <div class="flex-1 min-w-0">
-                                <div class="flex items-center justify-between gap-1">
-                                    <p class="text-white truncate font-medium">${escapeHtml(doc.filename)}</p>
-                                    <span class="text-[9px] ${status.color} whitespace-nowrap">${status.label}</span>
-                                </div>
-                                ${detailHtml}
-                                ${tagPlaceholder}
-                            </div>
-                            <button onclick="deleteDocument('${doc.id}')" class="text-slate-500 hover:text-conflict text-xs ml-1 opacity-50 hover:opacity-100">×</button>
-                        </div>
-                    </div>
-                `;
-            }).join('');
+            if (compactHint) {
+                if (uploadedDocuments.length > COMPACT_MAX) {
+                    compactHint.classList.remove('hidden');
+                } else {
+                    compactHint.classList.add('hidden');
+                }
+            }
             
-            if (documentsList) documentsList.innerHTML = docHtml;
-            
-            // Load tags for completed documents
-            loadDocumentTags();
+            // Also update modal if it's open
+            if (docsModal && !docsModal.classList.contains('hidden')) {
+                renderDocumentsInModal();
+            }
             
             // Auto-refresh if any documents are still processing
             const hasProcessing = uploadedDocuments.some(d => d.status === 'processing' || d.status === 'uploading');
             if (hasProcessing) {
-                setTimeout(() => loadDocuments(), 3000); // Refresh every 3 seconds
+                setTimeout(() => loadDocuments(), 3000);
             }
+        }
+
+        function renderDocumentsInModal() {
+            if (!docsModalList) return;
+            const emptyMessage = '<p class="text-[10px] text-slate-600 text-center py-8">ドキュメントがありません</p>';
+            
+            if (uploadedDocuments.length === 0) {
+                docsModalList.innerHTML = emptyMessage;
+                return;
+            }
+            
+            const fullHtml = uploadedDocuments.map(doc => buildDocCardHtml(doc, false)).join('');
+            docsModalList.innerHTML = fullHtml;
+            if (docsModalCount) docsModalCount.textContent = `${uploadedDocuments.length} files`;
+            
+            loadDocumentTags();
         }
         
         async function loadDocumentTags() {
