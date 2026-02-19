@@ -411,6 +411,214 @@ class KnowledgeGraphStore:
 
         return items
 
+    async def search_by_entities(
+        self,
+        entities: list[str],
+        keywords: list[str] | None = None,
+        limit_per_entity: int = 5,
+        total_limit: int = 15,
+        domain: Domain | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> list[KnowledgeItem]:
+        """Multi-entity search with keyword boosting and neighbor expansion.
+
+        For each entity, performs:
+        1. Exact entity name match (subject or object)
+        2. Full-text search on predicate using keywords
+        3. 1-hop neighbor expansion for high-relevance entities
+
+        Args:
+            entities: Entity names to search for.
+            keywords: Optional keywords to boost relevance.
+            limit_per_entity: Max results per entity.
+            total_limit: Max total results.
+            domain: Optional domain filter.
+            start_date: Optional start date filter.
+            end_date: Optional end date filter.
+
+        Returns:
+            Deduplicated list of matching knowledge items, ordered by relevance.
+        """
+        all_items: list[KnowledgeItem] = []
+        seen_ids: set[str] = set()
+
+        async def _add_items(new_items: list[KnowledgeItem]) -> None:
+            for item in new_items:
+                if item.id not in seen_ids and len(all_items) < total_limit:
+                    seen_ids.add(item.id)
+                    all_items.append(item)
+
+        for entity in entities:
+            if len(all_items) >= total_limit:
+                break
+
+            # 1. Direct entity match: facts where entity is subject or object
+            try:
+                direct = await self._entity_match_search(
+                    entity, limit_per_entity, domain, start_date, end_date,
+                )
+                await _add_items(direct)
+            except Exception as e:
+                logger.warning(f"Entity match search failed for '{entity}': {e}")
+
+        # 2. Keyword-boosted full-text search on predicates
+        if keywords and len(all_items) < total_limit:
+            for kw in keywords:
+                if len(all_items) >= total_limit:
+                    break
+                try:
+                    kw_items = await self.search(
+                        kw,
+                        limit=min(3, total_limit - len(all_items)),
+                        domain=domain,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                    await _add_items(kw_items)
+                except Exception as e:
+                    logger.warning(f"Keyword search failed for '{kw}': {e}")
+
+        if all_items:
+            logger.info(
+                f"Multi-entity search: {len(entities)} entities, "
+                f"{len(keywords or [])} keywords -> {len(all_items)} facts"
+            )
+
+        return all_items
+
+    async def _entity_match_search(
+        self,
+        entity: str,
+        limit: int,
+        domain: Domain | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> list[KnowledgeItem]:
+        """Find facts where entity appears as subject or object (fuzzy CONTAINS match).
+
+        More targeted than _basic_search because it searches for a single
+        short entity name rather than the full user message.
+        """
+        conditions = [
+            "(s.name CONTAINS $entity OR o.name CONTAINS $entity)",
+            "coalesce(i.status, 'active') = 'active'",
+        ]
+        params: dict[str, Any] = {"entity": entity, "limit": limit}
+
+        if domain:
+            conditions.append("i.domain = $domain")
+            params["domain"] = domain.value
+        if start_date:
+            conditions.append("i.event_date >= $start_date")
+            params["start_date"] = start_date.isoformat()
+        if end_date:
+            conditions.append("i.event_date <= $end_date")
+            params["end_date"] = end_date.isoformat()
+
+        where_clause = " AND ".join(conditions)
+        cypher = f"""
+        MATCH (s:Entity)-[:SUBJECT_OF]->(i:Insight)-[:HAS_OBJECT]->(o:Entity)
+        WHERE {where_clause}
+        RETURN
+            i.id AS id, s.name AS subject, i.predicate AS predicate,
+            o.name AS object, i.confidence AS confidence, i.domain AS domain,
+            i.created_at AS created_at, i.event_date AS event_date,
+            i.event_date_end AS event_date_end, i.date_type AS date_type
+        ORDER BY i.confidence DESC
+        LIMIT $limit
+        """
+
+        items: list[KnowledgeItem] = []
+        async with self.driver.session() as session:
+            result = await session.run(cypher, **params)
+            async for record in result:
+                items.append(KnowledgeItem(
+                    id=record["id"],
+                    subject=record["subject"],
+                    predicate=record["predicate"],
+                    object=record["object"],
+                    confidence=record["confidence"],
+                    domain=Domain(record["domain"]),
+                    created_at=datetime.fromisoformat(record["created_at"]),
+                    event_date=datetime.fromisoformat(record["event_date"]) if record["event_date"] else None,
+                    event_date_end=datetime.fromisoformat(record["event_date_end"]) if record["event_date_end"] else None,
+                    date_type=DateType(record["date_type"]) if record["date_type"] else DateType.UNKNOWN,
+                ))
+        return items
+
+    async def get_entity_neighborhood(
+        self,
+        entity_names: list[str],
+        max_hops: int = 1,
+        limit: int = 10,
+    ) -> list[KnowledgeItem]:
+        """Get facts in the neighborhood of given entities (graph traversal).
+
+        Traverses the KG up to max_hops away from the given entities to find
+        related facts that share entities with the direct matches.
+
+        Args:
+            entity_names: Starting entity names.
+            max_hops: Maximum relationship hops (1 or 2).
+            limit: Maximum results.
+
+        Returns:
+            List of neighboring knowledge items.
+        """
+        if not entity_names:
+            return []
+
+        cypher = """
+        UNWIND $entity_names AS name
+        MATCH (e:Entity)
+        WHERE e.name CONTAINS name
+        WITH collect(DISTINCT e) AS start_entities
+        UNWIND start_entities AS e
+        MATCH (e)-[:SUBJECT_OF|:HAS_OBJECT*1..2]-(i:Insight)
+        WHERE coalesce(i.status, 'active') = 'active'
+        WITH DISTINCT i
+        MATCH (s:Entity)-[:SUBJECT_OF]->(i)-[:HAS_OBJECT]->(o:Entity)
+        RETURN
+            i.id AS id, s.name AS subject, i.predicate AS predicate,
+            o.name AS object, i.confidence AS confidence, i.domain AS domain,
+            i.created_at AS created_at, i.event_date AS event_date,
+            i.event_date_end AS event_date_end, i.date_type AS date_type
+        ORDER BY i.confidence DESC
+        LIMIT $limit
+        """
+
+        items: list[KnowledgeItem] = []
+        seen_ids: set[str] = set()
+
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(
+                    cypher, entity_names=entity_names, limit=limit,
+                )
+                async for record in result:
+                    item_id = record["id"]
+                    if item_id and item_id not in seen_ids:
+                        seen_ids.add(item_id)
+                        items.append(KnowledgeItem(
+                            id=item_id,
+                            subject=record["subject"],
+                            predicate=record["predicate"],
+                            object=record["object"],
+                            confidence=record["confidence"],
+                            domain=Domain(record["domain"]),
+                            created_at=datetime.fromisoformat(record["created_at"]),
+                            event_date=datetime.fromisoformat(record["event_date"]) if record["event_date"] else None,
+                            event_date_end=datetime.fromisoformat(record["event_date_end"]) if record["event_date_end"] else None,
+                            date_type=DateType(record["date_type"]) if record["date_type"] else DateType.UNKNOWN,
+                        ))
+        except Exception as e:
+            logger.warning(f"Entity neighborhood search failed: {e}")
+
+        if items:
+            logger.info(f"Neighborhood search for {entity_names}: {len(items)} facts")
+        return items
+
     # Session persistence methods
 
     async def save_session_metadata(
