@@ -298,9 +298,116 @@
             #right-pane { display: none; }
             #resize-handle-right { display: none; }
         }
+
+        /* ===== Entrance Screen ===== */
+        #entrance-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 100;
+            background: #0f1114;
+            cursor: pointer;
+            transition: opacity 0.6s ease;
+            overflow: hidden;
+        }
+        #entrance-overlay.fade-out {
+            pointer-events: none;
+        }
+        #entrance-overlay.bg-fade {
+            background: transparent;
+            transition: background 1.2s ease;
+        }
+        #entrance-canvas-wrap {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            transform-origin: center center;
+            transition: none;
+        }
+        #entrance-canvas-wrap.fly-to-sidebar {
+            transition: transform 2.4s cubic-bezier(0.25, 0.1, 0.25, 1),
+                        opacity 1s ease 1.8s;
+            opacity: 0;
+        }
+        #entrance-canvas-wrap canvas {
+            display: block;
+            width: 100% !important;
+            height: 100% !important;
+        }
+        #entrance-text {
+            position: absolute;
+            left: 50%;
+            top: 55%;
+            transform: translate(-50%, -50%) translateY(12px);
+            text-align: center;
+            opacity: 0;
+            transition: opacity 0.8s ease, transform 0.8s ease;
+            z-index: 2;
+            pointer-events: none;
+        }
+        #entrance-text.visible {
+            opacity: 1;
+            transform: translate(-50%, -50%) translateY(0);
+        }
+        #entrance-text h1 {
+            font-size: 2rem;
+            font-weight: 600;
+            color: #fff;
+            letter-spacing: 0.04em;
+        }
+        #entrance-text p {
+            font-size: 0.85rem;
+            color: #64748b;
+            margin-top: 4px;
+            letter-spacing: 0.02em;
+        }
+        #entrance-hint {
+            position: absolute;
+            bottom: 48px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.75rem;
+            color: #475569;
+            opacity: 0;
+            transition: opacity 0.6s ease;
+            z-index: 2;
+            pointer-events: none;
+        }
+        #entrance-hint.visible {
+            opacity: 1;
+            animation: entranceHintPulse 2.5s ease-in-out infinite;
+        }
+        @keyframes entranceHintPulse {
+            0%, 100% { opacity: 0.45; }
+            50% { opacity: 0.8; }
+        }
+        @media (max-width: 640px) {
+            #entrance-text h1 { font-size: 1.5rem; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            #entrance-overlay,
+            #entrance-text,
+            #entrance-hint {
+                transition-duration: 0.01ms !important;
+                animation-duration: 0.01ms !important;
+            }
+        }
+
+        /* Main app hidden during entrance */
+        .app-hidden { visibility: hidden; }
     </style>
 </head>
 <body class="bg-surface-0 text-slate-300 min-h-screen">
+    <!-- Entrance Overlay -->
+    <div id="entrance-overlay">
+        <div id="entrance-canvas-wrap"></div>
+        <div id="entrance-text">
+            <h1>EL</h1>
+            <p>Eager Learner</p>
+        </div>
+        <div id="entrance-hint">クリックして開始</div>
+    </div>
+
     <!-- Toast Container -->
     <div id="toast-container" class="fixed top-4 right-4 z-50 space-y-2 pointer-events-none"></div>
 
@@ -315,7 +422,7 @@
         </div>
     </div>
 
-    <div class="h-screen flex flex-col">
+    <div id="main-app" class="h-screen flex flex-col app-hidden">
         <!-- Header - minimal -->
         <header class="flex-none h-12 px-4 flex items-center justify-between border-b border-white/5">
             <div class="flex items-center gap-3">
@@ -721,7 +828,7 @@
         // Knowledge Map - Organic Particle Sphere with Tag Data
         // =====================================================
         class KnowledgeMap {
-            constructor(container) {
+            constructor(container, options = {}) {
                 this.container = container;
                 this.particleCount = 4000;
                 this.radius = 80;
@@ -730,13 +837,20 @@
                 this.flashTimer = 0;
                 this.flashColor = null;
                 
+                // Entrance mode
+                this.isEntrance = options.entrance || false;
+                this.entrancePhase = this.isEntrance ? 'converge' : 'done';
+                this.entranceStartTime = 0;
+                this.entranceConvergeDuration = 4500;
+                this.entranceParticleOpacity = this.isEntrance ? 0 : 0.75;
+                
                 // Tag data
                 this.tagNodes = [];
-                this.tagNodeMap = {}; // Map of tag id -> tag node
+                this.tagNodeMap = {};
                 this.hoveredTag = null;
                 this.tooltip = null;
-                this.connectionLines = null; // Legacy
-                this.connectionLinesGroup = null; // Lines showing tag connections
+                this.connectionLines = null;
+                this.connectionLinesGroup = null;
                 
                 // Tag animation state
                 this.tagAnimating = false;
@@ -744,10 +858,10 @@
                 this.tagAnimDuration = 1500;
                 
                 // Zoom settings
-                this.zoomMin = this.radius * 1.5;  // Close zoom
-                this.zoomMax = this.radius * 4;    // Far zoom
+                this.zoomMin = this.radius * 1.5;
+                this.zoomMax = this.radius * 4;
                 this.zoomSpeed = 0.1;
-                this.targetZoom = this.radius * 2.8;
+                this.targetZoom = this.isEntrance ? this.radius * 2.4 : this.radius * 2.8;
                 
                 // Touch pinch
                 this.lastPinchDist = 0;
@@ -757,10 +871,12 @@
                 this.dragStart = { x: 0, y: 0 };
                 this.targetRotationX = 0;
                 this.targetRotationY = 0;
-                this.autoRotate = true; // Auto-rotate when not dragging
+                this.autoRotate = true;
                 
                 this.init();
-                this.loadTagData();
+                if (!this.isEntrance) {
+                    this.loadTagData();
+                }
             }
             
             init() {
@@ -777,7 +893,7 @@
                 this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
                 this.renderer.setClearColor(0x000000, 0);
                 this.renderer.setSize(rect.width, rect.height);
-                this.renderer.domElement.style.cursor = 'grab';
+                this.renderer.domElement.style.cursor = this.isEntrance ? 'pointer' : 'grab';
                 this.container.appendChild(this.renderer.domElement);
                 
                 // Raycaster for hover detection
@@ -788,30 +904,33 @@
                 this.circleTexture = this.createCircleTexture();
                 this.glowCircleTexture = this.createCircleTexture(true);
                 this.createParticles();
-                this.createTooltip();
                 
-                // Event listeners
-                this.renderer.domElement.addEventListener('mousemove', (e) => this.onMouseMove(e));
-                this.renderer.domElement.addEventListener('mouseleave', () => this.onMouseLeave());
+                if (!this.isEntrance) {
+                    this.createTooltip();
+                    
+                    // Event listeners (skip for entrance mode)
+                    this.renderer.domElement.addEventListener('mousemove', (e) => this.onMouseMove(e));
+                    this.renderer.domElement.addEventListener('mouseleave', () => this.onMouseLeave());
+                    
+                    // Drag rotation: mouse
+                    this.renderer.domElement.addEventListener('mousedown', (e) => this.onMouseDown(e));
+                    this.renderer.domElement.addEventListener('mouseup', () => this.onMouseUp());
+                    
+                    // Zoom: mouse wheel
+                    this.renderer.domElement.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
+                    
+                    // Touch: drag rotation (1 finger) + pinch zoom (2 fingers)
+                    this.renderer.domElement.addEventListener('touchstart', (e) => this.onTouchStart(e), { passive: false });
+                    this.renderer.domElement.addEventListener('touchmove', (e) => this.onTouchMove(e), { passive: false });
+                    this.renderer.domElement.addEventListener('touchend', () => this.onTouchEnd());
+                }
+                
                 window.addEventListener('resize', () => this.handleResize());
                 
-                // Watch container size changes (e.g. sidebar resize)
                 if (typeof ResizeObserver !== 'undefined') {
                     this._resizeObserver = new ResizeObserver(() => this.handleResize());
                     this._resizeObserver.observe(this.container);
                 }
-                
-                // Drag rotation: mouse
-                this.renderer.domElement.addEventListener('mousedown', (e) => this.onMouseDown(e));
-                this.renderer.domElement.addEventListener('mouseup', () => this.onMouseUp());
-                
-                // Zoom: mouse wheel
-                this.renderer.domElement.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
-                
-                // Touch: drag rotation (1 finger) + pinch zoom (2 fingers)
-                this.renderer.domElement.addEventListener('touchstart', (e) => this.onTouchStart(e), { passive: false });
-                this.renderer.domElement.addEventListener('touchmove', (e) => this.onTouchMove(e), { passive: false });
-                this.renderer.domElement.addEventListener('touchend', () => this.onTouchEnd());
                 
                 this.animate();
             }
@@ -1151,6 +1270,11 @@
                 const phases = new Float32Array(this.particleCount);
                 const depths = new Float32Array(this.particleCount);
                 
+                // Entrance mode: store scattered start positions
+                if (this.isEntrance) {
+                    this.entranceStartPositions = new Float32Array(this.particleCount * 3);
+                }
+                
                 for (let i = 0; i < this.particleCount; i++) {
                     const theta = Math.random() * Math.PI * 2;
                     const phi = Math.acos(2 * Math.random() - 1);
@@ -1169,15 +1293,32 @@
                     const y = r * Math.cos(phi);
                     const z = r * Math.sin(phi) * Math.sin(theta);
                     
-                    positions[i * 3] = x;
-                    positions[i * 3 + 1] = y;
-                    positions[i * 3 + 2] = z;
-                    
+                    // Store target (sphere) positions in basePositions
                     basePositions[i * 3] = x;
                     basePositions[i * 3 + 1] = y;
                     basePositions[i * 3 + 2] = z;
                     
                     depths[i] = depth;
+                    
+                    if (this.isEntrance) {
+                        // Scattered across the full viewport frustum
+                        // Camera at z=192, FOV 50° → visible half-height ≈ 89, half-width ≈ 89*aspect
+                        // Spread particles well beyond visible area for edge-to-edge effect
+                        const spread = this.radius * 3.5;
+                        const sx = (Math.random() - 0.5) * spread * 2 * (window.innerWidth / window.innerHeight);
+                        const sy = (Math.random() - 0.5) * spread * 2;
+                        const sz = (Math.random() - 0.5) * spread * 0.8;
+                        this.entranceStartPositions[i * 3] = sx;
+                        this.entranceStartPositions[i * 3 + 1] = sy;
+                        this.entranceStartPositions[i * 3 + 2] = sz;
+                        positions[i * 3] = sx;
+                        positions[i * 3 + 1] = sy;
+                        positions[i * 3 + 2] = sz;
+                    } else {
+                        positions[i * 3] = x;
+                        positions[i * 3 + 1] = y;
+                        positions[i * 3 + 2] = z;
+                    }
                     
                     const colorVariation = Math.random() * 0.2;
                     const depthFade = 0.5 + depth * 0.5;
@@ -1199,7 +1340,7 @@
                     map: this.circleTexture,
                     vertexColors: true,
                     transparent: true,
-                    opacity: 0.75,
+                    opacity: this.isEntrance ? 0 : 0.75,
                     blending: THREE.AdditiveBlending,
                     sizeAttenuation: true,
                     depthWrite: false
@@ -1646,7 +1787,13 @@
             
             lerp(a, b, t) { return a + (b - a) * t; }
             
+            startEntranceAnimation() {
+                this.entranceStartTime = performance.now();
+                this.entrancePhase = 'converge';
+            }
+            
             animate() {
+                if (this._disposed) return;
                 requestAnimationFrame(() => this.animate());
                 
                 // Smooth zoom interpolation
@@ -1662,7 +1809,7 @@
                 
                 // Auto-rotate when not dragging
                 if (this.autoRotate) {
-                    this.targetRotationY += 0.0004;
+                    this.targetRotationY += this.isEntrance && this.entrancePhase !== 'done' ? 0.001 : 0.0004;
                 }
                 
                 // Smooth rotation interpolation
@@ -1683,6 +1830,70 @@
                 
                 if (this.flashTimer > 0) {
                     this.flashTimer -= 0.016;
+                }
+                
+                // ---- Entrance converge animation ----
+                if (this.isEntrance && this.entrancePhase === 'converge' && this.entranceStartPositions) {
+                    const now = performance.now();
+                    const elapsed = now - this.entranceStartTime;
+                    const rawT = Math.min(elapsed / this.entranceConvergeDuration, 1);
+                    // Smooth ease-in-out for gentle movement
+                    const easeT = rawT < 0.5
+                        ? 4 * rawT * rawT * rawT
+                        : 1 - Math.pow(-2 * rawT + 2, 3) / 2;
+                    
+                    // Gentle fade-in over the first 40%
+                    const opacityT = Math.min(rawT / 0.4, 1);
+                    const opacityEase = opacityT * opacityT * (3 - 2 * opacityT);
+                    this.particles.material.opacity = opacityEase * 0.75;
+                    
+                    for (let i = 0; i < this.particleCount; i++) {
+                        const i3 = i * 3;
+                        // Per-particle stagger: outer particles arrive slightly later
+                        const bx = basePositions[i3], by = basePositions[i3+1], bz = basePositions[i3+2];
+                        const distFromCenter = Math.sqrt(bx*bx + by*by + bz*bz) / this.radius;
+                        const stagger = distFromCenter * 0.15;
+                        const pT = Math.max(0, Math.min(1, (easeT - stagger) / (1 - stagger)));
+                        
+                        const sx = this.entranceStartPositions[i3];
+                        const sy = this.entranceStartPositions[i3+1];
+                        const sz = this.entranceStartPositions[i3+2];
+                        
+                        positions[i3]     = sx + (bx - sx) * pT;
+                        positions[i3 + 1] = sy + (by - sy) * pT;
+                        positions[i3 + 2] = sz + (bz - sz) * pT;
+                        
+                        // Color: start as white/gold, blend to normal blue
+                        const depth = depths[i];
+                        const colorVariation = (i % 7) * 0.03;
+                        const depthFade = 0.5 + depth * 0.5;
+                        const nr = (0.2 + colorVariation * 0.3) * depthFade;
+                        const ng = (0.5 + colorVariation) * depthFade;
+                        const nb = (0.85 + (i % 5) * 0.03) * depthFade;
+                        
+                        // Gold-white at start → normal blue
+                        const goldR = 0.9, goldG = 0.66, goldB = 0.3;
+                        const colorBlend = pT;
+                        colors[i3]     = this.lerp(goldR, nr, colorBlend);
+                        colors[i3 + 1] = this.lerp(goldG, ng, colorBlend);
+                        colors[i3 + 2] = this.lerp(goldB, nb, colorBlend);
+                    }
+                    
+                    geometry.attributes.position.needsUpdate = true;
+                    geometry.attributes.color.needsUpdate = true;
+                    
+                    if (rawT >= 1) {
+                        this.entrancePhase = 'idle';
+                        this.particles.material.opacity = 0.75;
+                        delete this.entranceStartPositions;
+                        // Flash gold on completion
+                        this.flashTimer = 1.0;
+                        this.flashColor = [0.9, 0.66, 0.3];
+                        if (this._onConvergeComplete) this._onConvergeComplete();
+                    }
+                    
+                    this.renderer.render(this.scene, this.camera);
+                    return;
                 }
                 
                 const waveSpeed = 0.1;
@@ -1812,14 +2023,18 @@
             }
             
             dispose() {
+                this._disposed = true;
                 this.particles.geometry.dispose();
                 this.particles.material.dispose();
                 if (this.tagPoints) {
                     this.tagPoints.geometry.dispose();
                     this.tagPoints.material.dispose();
                 }
-                this.hideConnectionLines(); // Clean up connection lines
+                this.hideConnectionLines();
                 this.renderer.dispose();
+                if (this._resizeObserver) {
+                    this._resizeObserver.disconnect();
+                }
                 if (this.tooltip) {
                     this.tooltip.remove();
                 }
@@ -2040,13 +2255,140 @@
         });
 
         // Initialize Knowledge Map
-        let knowledgeMapModal = null; // Separate KnowledgeMap instance for modal
-        requestAnimationFrame(() => {
-            const mapContainer = document.getElementById('knowledge-map-canvas');
-            if (mapContainer) {
-                knowledgeMap = new KnowledgeMap(mapContainer);
+        let knowledgeMapModal = null;
+        let entranceMap = null;
+
+        // ==================== Entrance Screen ====================
+        (function initEntrance() {
+            const overlay = document.getElementById('entrance-overlay');
+            const canvasWrap = document.getElementById('entrance-canvas-wrap');
+            const textEl = document.getElementById('entrance-text');
+            const hintEl = document.getElementById('entrance-hint');
+            const mainApp = document.getElementById('main-app');
+
+            // Skip entrance if already seen this session
+            if (sessionStorage.getItem('el-entrance-seen')) {
+                overlay.remove();
+                mainApp.classList.remove('app-hidden');
+                requestAnimationFrame(() => {
+                    const mapContainer = document.getElementById('knowledge-map-canvas');
+                    if (mapContainer) knowledgeMap = new KnowledgeMap(mapContainer);
+                });
+                return;
             }
-        });
+
+            let transitioning = false;
+
+            // Create entrance sphere
+            entranceMap = new KnowledgeMap(canvasWrap, { entrance: true });
+
+            // Reduced motion: skip converge, go straight to idle
+            const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+            if (prefersReduced) {
+                entranceMap.entrancePhase = 'idle';
+                entranceMap.particles.material.opacity = 0.75;
+                textEl.classList.add('visible');
+                hintEl.classList.add('visible');
+            }
+
+            // Start converge after a brief pause
+            setTimeout(() => {
+                entranceMap.startEntranceAnimation();
+                entranceMap._onConvergeComplete = () => {
+                    // Phase 2: show text
+                    textEl.classList.add('visible');
+                    setTimeout(() => hintEl.classList.add('visible'), 800);
+                };
+            }, prefersReduced ? 0 : 300);
+
+            function doTransition() {
+                if (transitioning) return;
+                transitioning = true;
+                sessionStorage.setItem('el-entrance-seen', '1');
+
+                // Phase A: Fade out text (400ms)
+                textEl.style.opacity = '0';
+                hintEl.style.opacity = '0';
+
+                setTimeout(() => {
+                    // Phase B: Show main app behind overlay, fade overlay background
+                    mainApp.classList.remove('app-hidden');
+
+                    const mapContainer = document.getElementById('knowledge-map-canvas');
+
+                    // Hide sidebar sphere until the flying sphere arrives
+                    if (mapContainer) mapContainer.style.opacity = '0';
+
+                    overlay.classList.add('bg-fade');
+                    overlay.classList.add('fade-out');
+
+                    requestAnimationFrame(() => {
+                        // Calculate where the sidebar map is on screen
+                        const targetRect = mapContainer
+                            ? mapContainer.getBoundingClientRect()
+                            : { left: window.innerWidth - 200, top: 60, width: 200, height: 200 };
+
+                        const vw = window.innerWidth;
+                        const vh = window.innerHeight;
+                        const scaleX = targetRect.width / vw;
+                        const scaleY = targetRect.height / vh;
+                        const scale = Math.min(scaleX, scaleY);
+
+                        const targetCX = targetRect.left + targetRect.width / 2;
+                        const targetCY = targetRect.top + targetRect.height / 2;
+                        const dx = targetCX - vw / 2;
+                        const dy = targetCY - vh / 2;
+
+                        // Start fly-to-sidebar animation (2.4s move + 1s fade starting at 1.8s)
+                        canvasWrap.style.transform = `translate(${dx}px, ${dy}px) scale(${scale})`;
+                        canvasWrap.classList.add('fly-to-sidebar');
+
+                        // At 1.8s: sphere nearly arrived → init sidebar map behind the scenes
+                        setTimeout(() => {
+                            if (mapContainer && !knowledgeMap) {
+                                knowledgeMap = new KnowledgeMap(mapContainer);
+                                if (entranceMap) {
+                                    knowledgeMap.targetRotationX = entranceMap.targetRotationX;
+                                    knowledgeMap.targetRotationY = entranceMap.targetRotationY;
+                                    knowledgeMap.particles.rotation.x = entranceMap.particles.rotation.x;
+                                    knowledgeMap.particles.rotation.y = entranceMap.particles.rotation.y;
+                                }
+                            }
+                        }, 1800);
+
+                        // At 2.2s: gently fade in sidebar sphere as flying one fades out
+                        setTimeout(() => {
+                            if (mapContainer) {
+                                mapContainer.style.transition = 'opacity 0.8s ease';
+                                mapContainer.style.opacity = '1';
+                            }
+                        }, 2200);
+
+                        // Phase C: Clean up after everything settles
+                        setTimeout(() => {
+                            if (entranceMap) {
+                                entranceMap.dispose();
+                                entranceMap = null;
+                            }
+                            overlay.remove();
+                            if (mapContainer) {
+                                mapContainer.style.transition = '';
+                                mapContainer.style.opacity = '';
+                            }
+                        }, 3200);
+                    });
+                }, 400);
+            }
+
+            // Skip: click, enter, or touch
+            overlay.addEventListener('click', doTransition);
+            document.addEventListener('keydown', function entranceKey(e) {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    doTransition();
+                    document.removeEventListener('keydown', entranceKey);
+                }
+            });
+        })();
 
         // Knowledge Map Modal
         const kmModal = document.getElementById('knowledge-map-modal');
