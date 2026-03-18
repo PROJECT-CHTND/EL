@@ -6,7 +6,6 @@
 
 *Question-Driven Knowledge Extraction Agent*
 
-[![Award](https://img.shields.io/badge/🏆_ユニリタ_ユーザーシンポジウム-最優秀賞受賞-gold?style=for-the-badge)](https://example.com)
 [![License](https://img.shields.io/badge/License-Proprietary-blue?style=for-the-badge)](#license)
 [![API](https://img.shields.io/badge/API-v1.0-green?style=for-the-badge)](#api-reference)
 
@@ -207,12 +206,6 @@ ELライセンスには、LLMモデル世代交代への追従、RAGパイプラ
 | ネットワーク | LLM APIへのアウトバウンド接続 |
 
 オンプレミス環境での利用やローカルLLMとの連携については[お問い合わせ](#contact)ください。
-
----
-
-## 🏆 受賞歴
-
-- **ユニリタ ユーザーシンポジウム 最優秀賞**（2025年） — 「聞くAI」という新しいアプローチによるナレッジマネジメントの革新が評価されました
 
 ---
 
