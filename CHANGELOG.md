@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [1.0.0] - 2025-XX-XX
 
-### 🎉 Initial Release
+### Initial Release
 
 - **Interview Engine**: 質問駆動型のナレッジ抽出エンジン
   - 矛盾検知による自動質問生成
