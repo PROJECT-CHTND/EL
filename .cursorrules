@@ -1,0 +1,62 @@
+# EL Public Repository (.cursorrules)
+
+## プロジェクト概要
+
+このリポジトリは「EL（Eager Learner）」のPublicリポジトリです。
+オープンコア戦略に基づき、マーケティングと統合ポイントとして公開しています。
+
+ELは質問駆動型AIエージェントで、ドキュメントや会話から矛盾・不足を自動検知し、
+的確な質問を生成して暗黙知を引き出すプロダクトです。
+
+## 絶対に守るべきルール
+
+### コア技術の秘匿
+
+- el_core/ のソースコード、RAGパイプラインの実装詳細、プロンプトの中身は絶対に含めない
+- API仕様は公開するが、内部実装（どのようにLLMを呼んでいるか、プロンプト設計等）は記載しない
+- アーキテクチャ図ではEL Core Engineを必ずブラックボックスとして表現する
+- 「仕組み」ではなく「できること」を伝える
+
+### ライセンス構造
+
+- el_core はプロプライエタリ（ライセンスキー必須）
+- sdk/, examples/, el_frontend/, docs/ はMIT License
+- docker-compose.ymlでel-coreは `ghcr.io/your-org/el-core:latest` イメージとして参照する
+- ソースからのビルドは一切提供しない
+
+### コーディング規約
+
+- ドキュメント・コメントは日本語
+- コード（変数名、関数名、API仕様のフィールド名）は英語
+- Pythonは型ヒント必須（from __future__ import annotations）
+- Python 3.9+対応
+
+## リポジトリ構成
+
+```
+el-knowledge/
+├── README.md              ← 最重要。受賞歴・概要・クイックスタート
+├── docker-compose.yml     ← コアはDockerイメージとしてpull
+├── .env.example
+├── LICENSE                ← デュアルライセンス
+├── CHANGELOG.md
+├── docs/                  ← API仕様・アーキテクチャ・デプロイ・統合ガイド
+├── sdk/python/            ← Python SDK (MIT)
+├── examples/              ← 利用例 (MIT)
+└── el_frontend/           ← デモUI (MIT)
+```
+
+## 技術スタック
+
+- Backend API: Python / FastAPI（el-coreイメージ内に含まれる。このリポには含めない）
+- Database: PostgreSQL + pgvector
+- LLM: OpenAI API or Azure OpenAI
+- Frontend: React 18+ / TypeScript / Tailwind CSS
+- SDK: Python / requests
+
+## 作業時の判断基準
+
+- 「この情報があれば競合がELを再現できるか？」→ Yes なら書かない
+- 「この情報があれば顧客がELと統合できるか？」→ Yes なら書く
+- APIのリクエスト/レスポンス例は具体的に書く
+- 内部処理フローの詳細は書かない

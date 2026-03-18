@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  # ============================================
+  # EL Core Engine (Licensed)
+  # ============================================
+  el-core:
+    image: ghcr.io/your-org/el-core:latest
+    container_name: el-core
+    restart: unless-stopped
+    environment:
+      - EL_LICENSE_KEY=${EL_LICENSE_KEY}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4}
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================
+  # Database
+  # ============================================
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: el-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${DB_USER:-el}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME:-el_knowledge}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-el}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================
+  # Demo Frontend (Optional)
+  # ============================================
+  el-frontend:
+    build:
+      context: ./el_frontend
+      dockerfile: Dockerfile
+    container_name: el-frontend
+    restart: unless-stopped
+    environment:
+      - EL_API_URL=http://el-core:8000
+    ports:
+      - "${FRONTEND_PORT:-8080}:3000"
+    depends_on:
+      el-core:
+        condition: service_healthy
+
+volumes:
+  pgdata:
