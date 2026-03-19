@@ -43,8 +43,8 @@ ELが管理するクラウド環境を利用します。インフラの管理は
 
 ```bash
 # 1. リポジトリをクローン
-git clone https://github.com/your-org/el-knowledge.git
-cd el-knowledge
+git clone https://github.com/PROJECT-CHTND/EL.git
+cd EL
 
 # 2. 環境変数を設定
 cp .env.example .env
@@ -52,7 +52,7 @@ cp .env.example .env
 
 # 3. EL Core Engineイメージを取得（認証が必要）
 docker login ghcr.io
-docker pull ghcr.io/your-org/el-core:latest
+docker pull ghcr.io/PROJECT-CHTND/el-core:latest
 
 # 4. 起動
 docker compose up -d
@@ -117,4 +117,4 @@ docker compose up -d
 | DB接続エラー | PostgreSQLが未起動 | `docker compose up postgres` を先に実行 |
 | LLM APIエラー | APIキーが無効またはクォータ超過 | LLM_API_KEY を確認 |
 
-詳細なサポートは contact@example.com までお問い合わせください。
+詳細なサポートは ryan911calm@gmail.com までお問い合わせください。

@@ -5,8 +5,8 @@ setup(
     version="1.0.0",
     description="Python SDK for EL (Eager Learner) - Question-Driven Knowledge Extraction Agent",
     author="EL Team",
-    author_email="contact@example.com",
-    url="https://github.com/your-org/el-knowledge",
+    author_email="ryan911calm@gmail.com",
+    url="https://github.com/PROJECT-CHTND/EL",
     packages=find_packages(),
     install_requires=[
         "requests>=2.28.0",

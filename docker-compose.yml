@@ -5,7 +5,7 @@ services:
   # EL Core Engine (Licensed)
   # ============================================
   el-core:
-    image: ghcr.io/your-org/el-core:latest
+    image: ghcr.io/PROJECT-CHTND/el-core:latest
     container_name: el-core
     restart: unless-stopped
     environment:
